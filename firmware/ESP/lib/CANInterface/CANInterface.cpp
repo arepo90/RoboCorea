@@ -463,8 +463,11 @@ static bool zeReadRealtimeState(uint8_t dev) {
 //  Arm safety lifecycle: passive boot, explicit arm, latched CAN fault, ramp
 // ══════════════════════════════════════════════════════════════════════════════
 static volatile ArmState s_arm_state     = ArmState::UNINIT;
+static volatile ArmOperatingMode s_arm_mode = ArmOperatingMode::DEXTERITY;
 static volatile bool     s_arm_req_arm    = false;
 static volatile bool     s_arm_req_disarm = false;
+static volatile bool     s_arm_req_mode   = false;
+static volatile ArmOperatingMode s_arm_requested_mode = ArmOperatingMode::DEXTERITY;
 static uint8_t  s_arm_fault_code = 0;
 static uint16_t s_arm_can_fail   = 0;
 static uint16_t s_arm_motor_fail = 0;
@@ -501,6 +504,44 @@ static void enterArmFault(uint8_t code) {
     s_arm_motor_fail = 1;
     disableArmMotors();
     s_arm_state = ArmState::FAULT;
+}
+
+static bool applyArmOperatingMode(ArmOperatingMode mode) {
+    if (mode == s_arm_mode) return true;
+
+    if (mode == ArmOperatingMode::CHASSIS) {
+        // Gate position sends before torque-off so a concurrent control tick
+        // cannot restore position hold during the transition.
+        s_arm_mode = mode;
+        if (s_arm_state != ArmState::READY) return true;
+        bool ok = true;
+        for (uint8_t j = 0; j < LKTECH_NUM_JOINTS; j++) ok &= lkMotorStop(s_lk_id[j]);
+        if (!ok) enterArmFault(2 /*motor_cmd*/);
+        return ok;
+    }
+
+    if (s_arm_state == ArmState::READY) {
+        bool ok = true;
+        int64_t current_cdeg[LKTECH_NUM_JOINTS] = {};
+        for (uint8_t j = 0; j < LKTECH_NUM_JOINTS; j++) {
+            ok &= lkMotorOn(s_lk_id[j]);
+            delay(20);
+            ok &= lkReadMultiAngle(s_lk_id[j], current_cdeg[j]);
+        }
+        if (!ok) {
+            enterArmFault(2 /*motor_cmd*/);
+            return false;
+        }
+#if ARM_RAMP_ENABLE
+        for (uint8_t j = 0; j < LKTECH_NUM_JOINTS; j++) {
+            float motor_deg = (current_cdeg[j] - s_lk_zero_cdeg[j]) / 100.0f;
+            s_arm_ramp_pos[4 + j] = motor_deg / (s_lk_gear[j] * s_lk_dir[j]);
+            s_arm_ramp_vel[4 + j] = 0.0f;
+        }
+#endif
+    }
+    s_arm_mode = mode;
+    return true;
 }
 
 // Sliding-window failure counter on the arm send path → escalate to FAULT.
@@ -576,6 +617,15 @@ static bool armArmInternal() {
         ok &= ready;
     }
 
+    // Initialization needs J5/J6 awake to capture their zero. If transport mode
+    // was selected before arming, return them to torque-off before READY.
+    if (s_arm_mode == ArmOperatingMode::CHASSIS) {
+        bool stopped = true;
+        for (uint8_t j = 0; j < LKTECH_NUM_JOINTS; j++) stopped &= lkMotorStop(s_lk_id[j]);
+        if (!stopped && failed_stage == 0) failed_stage = 40;
+        ok &= stopped;
+    }
+
     if (!ok) {
         s_arm_fault_code = failed_stage;
         s_arm_motor_fail = 1;
@@ -608,7 +658,12 @@ bool CANInterface::begin() {
 
 void CANInterface::requestArm()    { s_arm_req_arm = true; }
 void CANInterface::requestDisarm() { s_arm_req_disarm = true; }
+void CANInterface::requestOperatingMode(ArmOperatingMode mode) {
+    s_arm_requested_mode = mode;
+    s_arm_req_mode = true;
+}
 uint8_t CANInterface::armState()   { return (uint8_t)s_arm_state; }
+uint8_t CANInterface::armOperatingMode() { return (uint8_t)s_arm_mode; }
 
 void CANInterface::getArmLifecycle(ArmLifecyclePayload& out) {
     out.state            = (uint8_t)s_arm_state;
@@ -617,6 +672,9 @@ void CANInterface::getArmLifecycle(ArmLifecyclePayload& out) {
     out.motor_fail_count = s_arm_motor_fail;
     out.eflg             = s_ok ? canBackendEflg() : 0;
     out.init_presence_mask = s_arm_presence_mask;
+    out.operating_mode     = (uint8_t)s_arm_mode;
+    if (s_arm_state != ArmState::READY) out.active_joint_mask = 0;
+    else out.active_joint_mask = (s_arm_mode == ArmOperatingMode::DEXTERITY) ? 0x3F : 0x0F;
 }
 
 bool CANInterface::isOk() { return s_ok; }
@@ -680,7 +738,8 @@ bool CANInterface::sendArmJoints(const float angles_deg_in[6]) {
     float dt = (now - s_arm_ramp_last) * 0.001f;
     s_arm_ramp_last = now;
     if (dt > 0.0f && dt < 0.5f) {
-        for (uint8_t j = 0; j < 6; j++) {
+        uint8_t ramp_count = (s_arm_mode == ArmOperatingMode::DEXTERITY) ? 6 : 4;
+        for (uint8_t j = 0; j < ramp_count; j++) {
             float v_des = clampf((goal[j] - s_arm_ramp_pos[j]) / dt, -s_arm_vmax[j], s_arm_vmax[j]);
             float dv    = clampf(v_des - s_arm_ramp_vel[j], -s_arm_amax[j] * dt, s_arm_amax[j] * dt);
             s_arm_ramp_vel[j] = clampf(s_arm_ramp_vel[j] + dv, -s_arm_vmax[j], s_arm_vmax[j]);
@@ -707,10 +766,12 @@ bool CANInterface::sendArmJoints(const float angles_deg_in[6]) {
     }
 
     // J5–J6: LKTech MULTI_LOOP_CONTROL_2 (motor centidegrees), offset by zero.
-    for (uint8_t j = 0; j < LKTECH_NUM_JOINTS; j++) {
-        float motor_deg = out[4 + j] * s_lk_gear[j] * s_lk_dir[j];
-        int64_t cdeg = s_lk_zero_cdeg[j] + (int64_t)(motor_deg * 100.0f);
-        ok &= lkSendPosition(s_lk_id[j], (int32_t)cdeg, LKTECH_DEFAULT_SPEED_DPS);
+    if (s_arm_mode == ArmOperatingMode::DEXTERITY) {
+        for (uint8_t j = 0; j < LKTECH_NUM_JOINTS; j++) {
+            float motor_deg = out[4 + j] * s_lk_gear[j] * s_lk_dir[j];
+            int64_t cdeg = s_lk_zero_cdeg[j] + (int64_t)(motor_deg * 100.0f);
+            ok &= lkSendPosition(s_lk_id[j], (int32_t)cdeg, LKTECH_DEFAULT_SPEED_DPS);
+        }
     }
 
     if (ok && s_arm_first_cmd) s_arm_first_cmd = false;
@@ -730,6 +791,10 @@ void CANInterface::poll() {
         s_arm_req_arm = false;
         if (s_arm_state == ArmState::UNINIT || s_arm_state == ArmState::FAULT)
             armArmInternal();
+    }
+    if (s_arm_req_mode) {
+        s_arm_req_mode = false;
+        applyArmOperatingMode(s_arm_requested_mode);
     }
 
     // Bus health / fault recovery first, so a BUS_OFF (or MCP fault) can recover

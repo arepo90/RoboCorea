@@ -291,6 +291,7 @@
 #define MSG_GRIPPER          0x16      // int16 normalised × 1000
 #define MSG_ARM_INIT         0x17      // 0-byte — explicit arm/init (passive boot)
 #define MSG_ARM_DISARM       0x18      // 0-byte — disarm the arm motors
+#define MSG_ARM_MODE         0x19      // 1 byte — 0 dexterity, 1 chassis/transport
 
 // ─── FreeRTOS task layout ────────────────────────────────────────────────────
 // Core 0: protocol (comms + CAN).  Core 1: control + sensors.

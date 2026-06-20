@@ -51,6 +51,10 @@ void Control::begin() {
     Comms::onArmLifecycle([](bool arm) {
         if (arm) CANInterface::requestArm(); else CANInterface::requestDisarm();
     });
+    Comms::onArmMode([](uint8_t mode) {
+        if (mode <= (uint8_t)ArmOperatingMode::CHASSIS)
+            CANInterface::requestOperatingMode((ArmOperatingMode)mode);
+    });
     Comms::onKeybind([](const KeybindPayload& p) { Control::setKeybind(p); });
     Comms::onPpmCalib([](const PpmCalibPayload& p) {
         RC::setCalib(p);

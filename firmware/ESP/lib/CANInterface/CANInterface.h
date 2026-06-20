@@ -18,6 +18,7 @@
 
 // Arm safety lifecycle state (see config.h "Arm safety lifecycle").
 enum class ArmState : uint8_t { UNINIT = 0, INITIALIZING = 1, READY = 2, FAULT = 3 };
+enum class ArmOperatingMode : uint8_t { DEXTERITY = 0, CHASSIS = 1 };
 
 class CANInterface {
 public:
@@ -31,7 +32,9 @@ public:
     // bring-up blocks for ~seconds, so it must not run in the control loop).
     static void requestArm();
     static void requestDisarm();
+    static void requestOperatingMode(ArmOperatingMode mode);
     static uint8_t armState();                          // ArmState value
+    static uint8_t armOperatingMode();                  // ArmOperatingMode value
     static void getArmLifecycle(ArmLifecyclePayload& out);
 
     // ── Base drivetrain (VESC) ──────────────────────────────────────────────

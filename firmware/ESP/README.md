@@ -17,6 +17,7 @@ For the whole-system picture see [`../../reference/architecture.md`](../../refer
 | **Traction** | 2 VESCs, differential drive, `SET_RPM` velocity commands. |
 | **Flippers** | 4 VESCs. The **position loop runs on the VESC** (LispBM — see [`../VESC/flipper_position.lisp`](../VESC/flipper_position.lisp)). The ESP integrates the stick into a target angle and sends it over a custom CAN frame; the VESC closes the loop and reports its angle back. Center stick = hold; no separate encoders. |
 | **Arm relay** | In ARM mode the tracks stop and the latest joint command from the PC is sent to the arm motors over CAN: ODrive J1–J3, ZE300 J4, LKTech J5–J6. |
+| **Arm operating mode** | Dexterity controls J1–J6. Chassis/transport keeps J1–J4 controlled and sends LKTech J5/J6 to motor-stop (torque-off). |
 | **Sensors** | LIS3MDL magnetometer over I2C. (No IMU on the ESP32 — orientation comes from the ZED2 camera on the Jetson; the thermal camera is on the Jetson; there is no gas sensor.) |
 | **Protocol** | Binary UART at 921600 baud to the Jetson. Telemetry at 50 Hz; the PC sends arm joints, keybinds, PPM calibration, sensor-enable, and e-stop. |
 
@@ -113,6 +114,7 @@ and must stay in sync with the Jetson bridge `struct` formats.
 | ← PC | 0x10 | Arm joints (6 × int16 deg×100) |
 | ← PC | 0x11 | Sensor enable mask |
 | ← PC | 0x12 / 0x13 | E-stop / clear |
+| ← PC | 0x19 | Arm operating mode: `0` dexterity, `1` chassis |
 | ← PC | 0x14 | Keybind table (15 bytes) |
 | ← PC | 0x15 | PPM calibration |
 | ← PC | 0x16 | Gripper (→ PC originates; reserved) |
@@ -132,6 +134,11 @@ derived from what the active Ch5 keybind row binds. The arm is relayed to CAN
 invalidated, so the arm only follows `/joint_states` received from that point on
 (no jump to a stale pose). Ch6 HIGH (or an MSG_ESTOP frame) forces ESTOP, which
 neutralises the drivetrain and stops the arm.
+
+The arm operating mode is independent of the robot's high-level `ARM` mode.
+`DEXTERITY` is the boot default. `CHASSIS` gates all J5/J6 position frames before
+sending LKTech motor-stop, and the gate remains in force across disarm/re-arm.
+J5/J6 are enabled again only by an explicit switch back to `DEXTERITY`.
 
 ---
 
