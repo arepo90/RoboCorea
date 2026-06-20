@@ -30,8 +30,8 @@ servo_node:
     char_length: 0.25
 
     # ── Safety / feel ──────────────────────────────────────────────────
-    joint_limit_margin: 0.05        # rad: hard stop-out from URDF limits
-    joint_limit_scale_zone: 0.20    # rad: soft slow-down band before the limit
+    joint_limit_margin: 0.1         # rad: hard stop-out from URDF limits
+    joint_limit_scale_zone: 0.4     # rad: soft slow-down band before the limit
     command_timeout: 0.2            # s: no command for this long → hold position
     smoothing_alpha: 1.0            # input EMA (1.0 = off; lower = smoother/laggier)
 

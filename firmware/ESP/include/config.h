@@ -132,6 +132,50 @@
 // (ESP sends enable=0 → lisp set-current 0). RC-loss always HOLDS (never homes).
 #define FLIPPER_ESTOP_HOLD        0
 
+// ── Flipper collision avoidance (dynamic joint limits) ──────────────────────
+// The front and rear flipper on the SAME side share a side-view plane and can
+// collide when they lean toward each other (rear up-forward + front up-back
+// meeting over the chassis, and the mirror image below). Geometry, per side:
+//   • both pivots lie on the chassis FLIPPER_PIVOT_SPACING_M apart (same height);
+//   • each flipper is a FLIPPER_LENGTH_M segment from its pivot to the tip;
+//   • 0° = pointing straight forward (+x), angle increases toward "up".
+// A collision zone exists only when 2·length > spacing > length (long enough to
+// reach each other, but pivots not so close they always overlap). The ESP clamps
+// each flipper's integrated TARGET so its segment never closes to within
+// FLIPPER_COLLISION_MARGIN_M of the paired flipper's MEASURED segment; a step
+// that would close the gap below the margin is refused (the flipper holds at the
+// boundary and frees the instant the stick reverses or the other flipper backs
+// off). The VESC still owns the actual position loop. Math + the 2y>x>y guard
+// live in lib/Control/FlipperCollision.h.
+#define FLIPPER_COLLISION_AVOID_ENABLE  1
+
+// Side-view geometry. PLACEHOLDERS — measure on the real chassis. Must satisfy
+// 2·FLIPPER_LENGTH_M > FLIPPER_PIVOT_SPACING_M > FLIPPER_LENGTH_M (a static_assert
+// in FlipperCollision.h enforces this whenever the feature is enabled).
+#define FLIPPER_PIVOT_SPACING_M   0.52f   // x: front↔rear pivot center distance (TODO measure)
+#define FLIPPER_LENGTH_M          0.38f   // y: pivot to tip (TODO measure)
+
+// Clearance kept between the two flipper centerlines: this flipper's half-width
+// + the other's half-width + a safety buffer. The buffer MUST exceed the tip
+// travel of both flippers in one control tick
+//   2 · FLIPPER_LENGTH_M · FLIPPER_RATE_DPS · (π/180) / CONTROL_LOOP_HZ
+// so a single step can never jump from "clear" to "touching". TODO: set from the
+// real flipper width plus a few mm of safety.
+#define FLIPPER_COLLISION_MARGIN_M  0.1f
+
+// Per-flipper mapping from the VESC-reported angle to the shared geometric frame
+// (0° = forward, + = up/CCW):  geo = SIGN · (reported_deg − OFFSET_DEG). Use
+// these if a flipper's zero isn't "forward" or it rotates the opposite way (e.g.
+// a mirrored mount). Default: identity (reported angle is already in-frame).
+#define FLIPPER_GEO_OFFSET_FL   0.0f
+#define FLIPPER_GEO_OFFSET_FR   0.0f
+#define FLIPPER_GEO_OFFSET_RL   0.0f
+#define FLIPPER_GEO_OFFSET_RR   0.0f
+#define FLIPPER_GEO_SIGN_FL   (1.0f)
+#define FLIPPER_GEO_SIGN_FR   (1.0f)
+#define FLIPPER_GEO_SIGN_RL   (1.0f)
+#define FLIPPER_GEO_SIGN_RR   (1.0f)
+
 // ─── Arm: ODrive (J1–J3) ─────────────────────────────────────────────────────
 // CANSimple, COB-ID = (node_id << 5) | cmd_id. Node IDs from the legacy bridge.
 #define ODRIVE_NUM_JOINTS         3

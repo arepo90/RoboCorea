@@ -152,7 +152,7 @@ class SdlsServo(Node):
         # Default seed is a well-conditioned "ready" pose (σ_min≈0.12); the arm's
         # all-zeros pose is an exact singularity, so do NOT default to zeros.
         self.declare_parameter('initial_positions',
-                               [0.0, -2.0, 1.0, 0.0, -0.8, 0.0])
+                               [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
         urdf = self.get_parameter('robot_description').value
         if not urdf:

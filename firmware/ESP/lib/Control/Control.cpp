@@ -5,6 +5,7 @@
 #include "Sensors.h"
 #include "CANInterface.h"
 #include "Comms.h"
+#include "FlipperCollision.h"
 #include <Arduino.h>
 #include <cmath>
 
@@ -229,15 +230,31 @@ void Control::applyKeybindRow(int mode_idx, const PPMFrame& ppm) {
         if (flip_all != 0.0f) { norms[0] = norms[1] = norms[2] = norms[3] = flip_all; }
         else                  { for (int i = 0; i < 4; i++) norms[i] = flip[i]; }
 
+        // Integrate each stick into a candidate target first; commit afterwards
+        // so the collision clamp sees this cycle's intent for every flipper.
+        float candidate[4];
         for (int i = 0; i < 4; i++) {
             float delta = norms[i] * kFlipDir[i] * FLIPPER_RATE_DPS * dt;
 #if FLIPPER_SOFT_LIMIT_ENABLE
-            s_flip_target[i] = clampf(s_flip_target[i] + delta,
-                                      FLIPPER_ANGLE_MIN, FLIPPER_ANGLE_MAX);
+            candidate[i] = clampf(s_flip_target[i] + delta,
+                                  FLIPPER_ANGLE_MIN, FLIPPER_ANGLE_MAX);
 #else
-            s_flip_target[i] = wrap360f(s_flip_target[i] + delta);
+            candidate[i] = wrap360f(s_flip_target[i] + delta);
 #endif
         }
+
+#if FLIPPER_COLLISION_AVOID_ENABLE
+        // Dynamic joint limits: refuse any step that would close a front/rear
+        // pair to within FLIPPER_COLLISION_MARGIN_M, measured against the paired
+        // flipper's actual reported angle (see FlipperCollision.h).
+        float measured[4];
+        CANInterface::getFlipperAngles(measured);
+        for (int i = 0; i < 4; i++)
+            candidate[i] = FlipperCollision::clampTarget(i, candidate[i],
+                                                         s_flip_target[i], measured);
+#endif
+
+        for (int i = 0; i < 4; i++) s_flip_target[i] = candidate[i];
         Locomotion::setFlipperAngles(s_flip_target, /*enabled=*/true);
     } else {
         // No flipper bound in this row → HOLD the last target (keep the loop

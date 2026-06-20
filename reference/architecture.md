@@ -334,6 +334,18 @@ control loop target is **50 Hz**.
     **holds** where it is released (center = hold). Direction sign
     (`FLIPPER_DIR_*`) is applied here. Optional soft limits, else the target wraps
     `[0, 360)`.
+  - **Collision avoidance (dynamic limits).** The front and rear flipper on each
+    side share a side-view plane and can ram each other when they lean together
+    (e.g. rear up-forward + front up-back meeting over the chassis). Before each
+    target step is committed, the ESP computes the segment-to-segment clearance of
+    the pair — geometry from `config.h` (`FLIPPER_PIVOT_SPACING_M` *x*,
+    `FLIPPER_LENGTH_M` *y*, with a collision zone only when `2y > x > y`) — against
+    the **partner's measured angle**, and refuses any step that would close them
+    below `FLIPPER_COLLISION_MARGIN_M`. The flipper holds at the boundary and
+    frees the instant the stick reverses or the other flipper backs off (reactive,
+    decoupled — no autonomous re-routing). Math + the `2y>x>y` `static_assert` live
+    in `lib/Control/FlipperCollision.h`; disable with
+    `FLIPPER_COLLISION_AVOID_ENABLE 0`.
   - **Transport.** The ESP sends the absolute wrapped target to the flipper VESC
     in a **custom CAN frame** (`VESC_CMD_FLIPPER_TARGET 0x7E`; *not* `SET_RPM`,
     which would engage the VESC's own speed loop and fight the lisp's
