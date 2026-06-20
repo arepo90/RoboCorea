@@ -17,6 +17,7 @@ using EstopCallback        = void(*)(bool active);
 using KeybindCallback      = void(*)(const KeybindPayload&);
 using PpmCalibCallback     = void(*)(const PpmCalibPayload&);
 using ArmLifecycleCallback = void(*)(bool arm);   // true = arm/init, false = disarm
+using ArmModeCallback      = void(*)(uint8_t mode);
 
 class Comms {
 public:
@@ -43,6 +44,7 @@ public:
     static void onKeybind(KeybindCallback cb)           { s_cb_keybind = cb; }
     static void onPpmCalib(PpmCalibCallback cb)         { s_cb_ppm_calib = cb; }
     static void onArmLifecycle(ArmLifecycleCallback cb) { s_cb_arm_life = cb; }
+    static void onArmMode(ArmModeCallback cb)           { s_cb_arm_mode = cb; }
 
     static bool isConnected();
 
@@ -67,4 +69,5 @@ private:
     static KeybindCallback      s_cb_keybind;
     static PpmCalibCallback     s_cb_ppm_calib;
     static ArmLifecycleCallback s_cb_arm_life;
+    static ArmModeCallback      s_cb_arm_mode;
 };

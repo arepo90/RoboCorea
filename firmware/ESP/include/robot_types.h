@@ -201,6 +201,8 @@ struct ArmLifecyclePayload {
     uint16_t motor_fail_count;
     uint8_t  eflg;                 // last MCP2515 EFLG snapshot (0 if N/A)
     uint16_t init_presence_mask;    // bits: 0..2 ODrive J1..J3, 3 ZE300 J4, 4..5 LKTech J5..J6
+    uint8_t  operating_mode;        // 0 DEXTERITY, 1 CHASSIS
+    uint8_t  active_joint_mask;     // bits 0..5 = J1..J6 actively position-controlled
 };
 
 #pragma pack(pop)
@@ -218,7 +220,7 @@ static_assert(sizeof(OdriveErrorPayload) ==  9, "OdriveErrorPayload size");
 static_assert(sizeof(LktechStatusPayload) == 11, "LktechStatusPayload size");
 static_assert(sizeof(Ze300StatusPayload) == 14, "Ze300StatusPayload size");
 static_assert(sizeof(GripperPayload)     ==  2, "GripperPayload size");
-static_assert(sizeof(ArmLifecyclePayload) ==  9, "ArmLifecyclePayload size");
+static_assert(sizeof(ArmLifecyclePayload) == 11, "ArmLifecyclePayload size");
 static_assert(sizeof(ArmJointsPayload)   == 12, "ArmJointsPayload size");
 static_assert(sizeof(KeybindPayload)     == 15, "KeybindPayload size");
 static_assert(sizeof(PpmCalibPayload)    == 38, "PpmCalibPayload size");

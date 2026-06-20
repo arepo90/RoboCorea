@@ -35,6 +35,22 @@ ros2 service call /arm/arm std_srvs/srv/Trigger "{}"
 Expected devices are ODrive nodes `0x10/0x11/0x12`, ZE300 device `13`, and
 LKTech motors `14/15`.
 
+## Arm operating mode
+
+```bash
+# J1-J6 position controlled
+ros2 service call /arm/mode/dexterity std_srvs/srv/Trigger "{}"
+
+# J1-J4 controlled; LKTech J5/J6 motor-stop (torque-off)
+ros2 service call /arm/mode/chassis std_srvs/srv/Trigger "{}"
+
+ros2 topic echo /arm/operating_mode
+ros2 topic echo /arm/joint_active_mask
+```
+
+The active mask is `0x3f` in ready dexterity mode and `0x0f` in ready chassis
+mode. It is zero while the arm lifecycle is not `READY`.
+
 ## Run
 
 ```bash

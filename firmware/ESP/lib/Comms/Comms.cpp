@@ -17,6 +17,7 @@ EstopCallback        Comms::s_cb_estop      = nullptr;
 KeybindCallback      Comms::s_cb_keybind    = nullptr;
 PpmCalibCallback     Comms::s_cb_ppm_calib  = nullptr;
 ArmLifecycleCallback Comms::s_cb_arm_life   = nullptr;
+ArmModeCallback      Comms::s_cb_arm_mode   = nullptr;
 
 static HardwareSerial& s_uart = Serial;   // UART0, shared with the USB cable
 
@@ -102,6 +103,9 @@ void Comms::processFrame(uint8_t type, const uint8_t* buf, uint16_t len) {
             break;
         case MSG_ARM_DISARM:
             if (s_cb_arm_life) s_cb_arm_life(false);
+            break;
+        case MSG_ARM_MODE:
+            if (len == 1 && s_cb_arm_mode) s_cb_arm_mode(buf[0]);
             break;
         default: break;
     }

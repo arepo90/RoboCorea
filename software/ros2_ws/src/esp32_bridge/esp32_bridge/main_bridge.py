@@ -26,6 +26,8 @@ Published (ESP32 → PC)
 /motors/ze300_status  std_msgs/Float32MultiArray  [id, temp_C, iq_A, rpm, single_turn, pos_counts, out_deg]
 /motors/odrive_error  std_msgs/Float32MultiArray  [node_id, motor_error]
 /gripper              std_msgs/Float32            normalised gripper command from RC
+/arm/operating_mode   std_msgs/String             DEXTERITY or CHASSIS
+/arm/joint_active_mask std_msgs/UInt8              bits 0..5 indicate active position control
 
 Subscribed (PC → ESP32)
 ───────────────────────
@@ -100,9 +102,11 @@ MSG_KEYBIND       = 0x14
 MSG_PPM_CALIB     = 0x15
 MSG_ARM_INIT      = 0x17
 MSG_ARM_DISARM    = 0x18
+MSG_ARM_MODE      = 0x19
 
 # Arm lifecycle state codes (match firmware ArmState)
 ARM_STATE_NAMES = {0: 'UNINIT', 1: 'INITIALIZING', 2: 'READY', 3: 'FAULT'}
+ARM_MODE_NAMES = {0: 'DEXTERITY', 1: 'CHASSIS'}
 
 MODE_NAMES = {0: 'INIT', 1: 'STANDBY', 2: 'NORMAL', 3: 'ARM', 4: 'ESTOP', 5: 'FLIPPER'}
 
@@ -213,11 +217,16 @@ class ESP32BridgeNode(Node):
         self._pub_arm_state = self.create_publisher(String,            '/arm/state',       latched_qos)
         self._pub_arm_fault = self.create_publisher(Bool,              '/arm/fault',       latched_qos)
         self._pub_arm_presence = self.create_publisher(UInt16,          '/arm/can_presence', latched_qos)
+        self._pub_arm_mode = self.create_publisher(String, '/arm/operating_mode', latched_qos)
+        self._pub_arm_active = self.create_publisher(UInt8, '/arm/joint_active_mask', latched_qos)
         self._last_arm_state = None
+        self._last_arm_mode = None
 
         # Arm arm/disarm services (operator → ESP32 explicit lifecycle commands)
         self.create_service(Trigger, '/arm/arm',    self._srv_arm)
         self.create_service(Trigger, '/arm/disarm', self._srv_disarm)
+        self.create_service(Trigger, '/arm/mode/dexterity', self._srv_dexterity_mode)
+        self.create_service(Trigger, '/arm/mode/chassis', self._srv_chassis_mode)
 
         # Subscribers
         self.create_subscription(Bool,       '/robot/estop',         self._on_estop,         10)
@@ -572,16 +581,22 @@ class ESP32BridgeNode(Node):
         presence = 0
         if len(payload) >= 9:
             presence, = struct.unpack('<H', payload[7:9])
+        operating_mode = payload[9] if len(payload) >= 10 else 0
+        active_mask = payload[10] if len(payload) >= 11 else (0x3F if state == 2 else 0)
         name = ARM_STATE_NAMES.get(state, f'UNKNOWN({state})')
-        if name != self._last_arm_state:
+        mode_name = ARM_MODE_NAMES.get(operating_mode, f'UNKNOWN({operating_mode})')
+        if name != self._last_arm_state or mode_name != self._last_arm_mode:
             self._last_arm_state = name
+            self._last_arm_mode = mode_name
             self.get_logger().info(
-                f'arm lifecycle: {name} fault={fault_code} '
+                f'arm lifecycle: {name} mode={mode_name} active=0x{active_mask:02X} fault={fault_code} '
                 f'can_fail={can_fail} motor_fail={motor_fail} eflg=0x{eflg:02X} '
                 f'presence=0x{presence:04X}')
         sm = String(); sm.data = name; self._pub_arm_state.publish(sm)
         fb = Bool(); fb.data = (state == 3); self._pub_arm_fault.publish(fb)
         pm = UInt16(); pm.data = presence; self._pub_arm_presence.publish(pm)
+        mm = String(); mm.data = mode_name; self._pub_arm_mode.publish(mm)
+        am = UInt8(); am.data = active_mask; self._pub_arm_active.publish(am)
 
     def _srv_arm(self, request, response):
         self._send(_build_frame(MSG_ARM_INIT, b''))
@@ -596,6 +611,19 @@ class ESP32BridgeNode(Node):
         response.message = 'arm disarm requested'
         self.get_logger().warn('Arm: disarm requested')
         return response
+
+    def _request_arm_mode(self, mode, name, response):
+        self._send(_build_frame(MSG_ARM_MODE, bytes([mode])))
+        response.success = True
+        response.message = f'{name.lower()} mode requested'
+        self.get_logger().info(f'Arm mode: {name} requested')
+        return response
+
+    def _srv_dexterity_mode(self, request, response):
+        return self._request_arm_mode(0, 'DEXTERITY', response)
+
+    def _srv_chassis_mode(self, request, response):
+        return self._request_arm_mode(1, 'CHASSIS', response)
 
     def _on_joint_states(self, msg: JointState):
         if not msg.name or not msg.position:
