@@ -1,0 +1,11 @@
+std_msgs/Header header
+uint32 sequence
+bool sensor_ok
+float32 min_temperature
+float32 max_temperature
+float32 center_temperature
+uint16 hotspot_x
+uint16 hotspot_y
+uint32 total_read_errors
+uint32 consecutive_read_errors
+float32 acquisition_rate_hz
