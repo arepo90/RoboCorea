@@ -1,0 +1,23 @@
+mlx90640_node:
+  ros__parameters:
+    bus: 7
+    address: 51  # 0x33
+    refresh_rate: 8
+    publish_rate: 8.0
+    frame_id: mlx90640_link
+    raw_topic: thermal/image_raw
+    filtered_topic: thermal/image_filtered
+    status_topic: thermal/status
+    filter_alpha: 0.55
+    use_dummy: false
+
+thermal_visualizer_node:
+  ros__parameters:
+    input_topic: thermal/image_filtered
+    output_topic: thermal/image_color
+    visualization_scale: 10
+    gaussian_sigma: 0.0
+    auto_scale: true
+    min_celsius: 15.0
+    max_celsius: 45.0
+    range_alpha: 0.2
