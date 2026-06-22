@@ -269,6 +269,28 @@
 // custom-frame (non-fake-RPM) path actually coasts when this is 0.
 #define FLIPPER_ESTOP_HOLD        1
 
+// ─── Gripper (end-effector servo, local hobby PWM — ARM board only) ──────────
+// A single JX CLS-12V7346 coreless servo on a direct ESP32 PWM pin drives the
+// gripper (one servo moves both jaws via a linkage). It lives on the ARM PCB
+// (the arm's end-effector) and is the only PWM actuator — everything else is
+// CAN. The open/close COMMAND comes from the workstation gamepad's RT/LT
+// triggers: the joystick node sends a signed rate on /gripper (+1 open … −1
+// close) → bridge → MSG_GRIPPER (PC→ESP, routed to the ARM link). The firmware
+// integrates that rate into a clamped target angle at GRIPPER_RATE_DPS and holds
+// at the limits. Power the servo from the 11.1–15 V rail (NOT the ESP32) and
+// common-ground the signal. Bench sketch: firmware/servo_test.
+// The Gripper module only runs when ROBOCOREA_ROLE_IS_ARM (see main.cpp/Control).
+#define PIN_GRIPPER_SERVO       26     // ARM-board GPIO for the servo signal
+#define GRIPPER_LEDC_CHANNEL     0     // LEDC channel (no other PWM on the arm board)
+#define GRIPPER_PWM_HZ          50     // 50 Hz standard; the JX servo also accepts up to 330
+#define GRIPPER_PWM_BITS        16     // LEDC duty resolution
+#define GRIPPER_PULSE_MIN_US   500     // 0.5 ms → 0 deg  (JX control-board full range)
+#define GRIPPER_PULSE_MAX_US  2500     // 2.5 ms → 180 deg
+#define GRIPPER_CLOSED_DEG     0.0f    // fully-closed servo angle  (TODO: set mechanically)
+#define GRIPPER_OPEN_DEG     120.0f    // fully-open servo angle    (TODO: set mechanically)
+#define GRIPPER_RATE_DPS      90.0f    // open/close speed at full trigger (deg/s)
+#define GRIPPER_CMD_TIMEOUT_MS 500     // no fresh command within this → stop stepping (hold)
+
 // ─── Arm: ODrive (J1–J3) ─────────────────────────────────────────────────────
 // CANSimple, COB-ID = (node_id << 5) | cmd_id. Node IDs from the legacy bridge.
 #define ODRIVE_NUM_JOINTS         3
@@ -435,7 +457,7 @@
                                        // replaced by the fixed RC control scheme
                                        // (firmware Control.cpp); id kept reserved.
 #define MSG_PPM_CALIB        0x15      // 6ch × (min,neutral,max) u16 + deadband
-#define MSG_GRIPPER          0x16      // int16 normalised × 1000
+#define MSG_GRIPPER          0x16      // PC→ESP(ARM): gripper open/close rate, int16 ×1000 (+open/−close)
 #define MSG_ARM_INIT         0x17      // 0-byte — explicit arm/init (passive boot)
 #define MSG_ARM_DISARM       0x18      // 0-byte — disarm the arm motors
 #define MSG_ARM_MODE         0x19      // 1 byte — 0 dexterity, 1 chassis/transport

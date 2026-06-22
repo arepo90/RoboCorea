@@ -23,6 +23,7 @@
 #include "Locomotion.h"
 #include "Comms.h"
 #include "Control.h"
+#include "Gripper.h"
 
 // ─── Core 1: control state machine ────────────────────────────────────────────
 static void controlTask(void*) {
@@ -141,6 +142,9 @@ void setup() {
     CANInterface::begin();   // TWAI + arm controller bring-up (blocking)
 #if ROBOCOREA_ROLE_IS_CHASSIS
     Locomotion::begin();     // zero the drivetrain VESCs
+#endif
+#if ROBOCOREA_ROLE_IS_ARM
+    Gripper::begin();        // LEDC end-effector servo on GPIO26; park at closed
 #endif
     Control::begin();        // register callbacks, configure flipper PIDs
 #if ROBOCOREA_ROLE_IS_CHASSIS

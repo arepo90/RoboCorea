@@ -149,7 +149,7 @@ struct Ze300StatusPayload {
     int16_t output_deg_10;         // software-zeroed output × 10
 };
 
-// Gripper command forwarded to the PC.
+// Gripper open/close rate from the PC (PC→ESP, arm PCB): int16 ×1000, +open/−close.
 struct GripperPayload {
     int16_t value_1000;            // normalised × 1000 (−1000..+1000)
 };

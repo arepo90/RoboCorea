@@ -18,6 +18,7 @@ using PpmCalibCallback     = void(*)(const PpmCalibPayload&);
 using ArmLifecycleCallback = void(*)(bool arm);   // true = arm/init, false = disarm
 using ArmModeCallback      = void(*)(uint8_t mode);
 using TractionCmdCallback  = void(*)(const TractionCmdPayload&);  // external /cmd_vel drive
+using GripperCallback      = void(*)(float rate); // gripper open/close rate (+open/−close)
 
 class Comms {
 public:
@@ -34,7 +35,6 @@ public:
     static void sendZe300Status(const Ze300StatusPayload& z);
     static void sendOdriveError(const OdriveErrorPayload& e);
     static void sendStatus(const SystemStatus& status);
-    static void sendGripper(float norm);
     static void sendArmLifecycle(const ArmLifecyclePayload& p);
     static void sendBoardIdentity();
 
@@ -46,6 +46,7 @@ public:
     static void onArmLifecycle(ArmLifecycleCallback cb) { s_cb_arm_life = cb; }
     static void onArmMode(ArmModeCallback cb)           { s_cb_arm_mode = cb; }
     static void onTraction(TractionCmdCallback cb)      { s_cb_traction = cb; }
+    static void onGripper(GripperCallback cb)           { s_cb_gripper = cb; }
 
     static bool isConnected();
 
@@ -71,4 +72,5 @@ private:
     static ArmLifecycleCallback s_cb_arm_life;
     static ArmModeCallback      s_cb_arm_mode;
     static TractionCmdCallback  s_cb_traction;
+    static GripperCallback      s_cb_gripper;
 };
