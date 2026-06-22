@@ -4,6 +4,13 @@ Autonomy proof-of-concept for RoboCorea: drive the tracked robot into a RoboCup
 Rescue track, navigate to a waypoint (the end) and back, **autonomously**, with
 progress visible in RViz.
 
+> **Competition operators:** for the two production real-robot workflows
+> (unknown-arena mapping and known-map navigation) and every copy-paste command,
+> see **[docs/COMPETITION_WORKFLOWS.md](docs/COMPETITION_WORKFLOWS.md)**. The
+> entry points are `real_mapping.launch.py`, `save_competition_map.launch.py`,
+> and `real_navigation.launch.py` (AMCL by default, `localization:=slam_toolbox`
+> optional). The launches below are the sim/PoC and lower-level building blocks.
+
 This package is the **navigation layer**. It deliberately builds on
 [`dicerox_mapping`](../dicerox_mapping/), which already does the 2D mapping,
 localization, and TF. `rescue_nav` adds the pieces that were missing:

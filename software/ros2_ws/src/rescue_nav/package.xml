@@ -23,6 +23,11 @@
   <exec_depend>xacro</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_simple_commander</exec_depend>
+  <!-- Known-map navigation (real_navigation localization:=amcl): map_server + AMCL. -->
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
+  <!-- Static base_footprint->base_link->base_laser TFs in sensor_frontend. -->
+  <exec_depend>tf2_ros</exec_depend>
 
   <!-- Mapping, localization, the TF tree, and the reused scan_frame_republisher /
        slam_toolbox config all come from dicerox_mapping (we build on it). -->

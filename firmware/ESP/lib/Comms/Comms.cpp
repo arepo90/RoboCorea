@@ -18,6 +18,7 @@ PpmCalibCallback     Comms::s_cb_ppm_calib  = nullptr;
 ArmLifecycleCallback Comms::s_cb_arm_life   = nullptr;
 ArmModeCallback      Comms::s_cb_arm_mode   = nullptr;
 TractionCmdCallback  Comms::s_cb_traction   = nullptr;
+GripperCallback      Comms::s_cb_gripper    = nullptr;
 
 static HardwareSerial& s_uart = Serial;   // UART0, shared with the USB cable
 
@@ -109,6 +110,12 @@ void Comms::processFrame(uint8_t type, const uint8_t* buf, uint16_t len) {
                 TractionCmdPayload p; memcpy(&p, buf, sizeof(p)); s_cb_traction(p);
             }
             break;
+        case MSG_GRIPPER:
+            if (len == sizeof(GripperPayload) && s_cb_gripper) {
+                GripperPayload p; memcpy(&p, buf, sizeof(p));
+                s_cb_gripper(p.value_1000 / 1000.0f);
+            }
+            break;
         default: break;
     }
 }
@@ -179,12 +186,6 @@ void Comms::sendStatus(const SystemStatus& s) {
     buf[2] = s.sensor_mask;
     buf[3] = 0;
     sendFrame(MSG_STATUS, buf, sizeof(buf));
-}
-
-void Comms::sendGripper(float norm) {
-    GripperPayload p;
-    p.value_1000 = (int16_t)(norm * 1000.0f);
-    sendFrame(MSG_GRIPPER, reinterpret_cast<const uint8_t*>(&p), sizeof(p));
 }
 
 void Comms::sendArmLifecycle(const ArmLifecyclePayload& p) {

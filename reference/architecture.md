@@ -298,6 +298,7 @@ firmware/
       Locomotion/       # Differential mixing + flipper target angle / hold → VESC
       CANInterface/     # CAN HAL (MCP2515 active / TWAI optional); gated by board role
       Comms/            # Binary UART protocol TX/RX
+      Gripper/          # End-effector servo (LEDC PWM, GPIO26); ARM role only (§13.4)
       PID/              # Reusable PID (shortest-angle + D low-pass) — spare; flippers loop on the VESC
       Debug/            # Optional serial debug (mutually aware of ENABLE_COMMS)
     src/
@@ -495,7 +496,7 @@ firmware (`robot_types.h`) and the bridge (Python `struct`).
 | 0x13 | E-stop clear | (empty) — resume |
 | 0x14 | *(reserved)* | was Keybind — the RC uses a fixed control scheme now (§13.2) |
 | 0x15 | PPM calibration | 6 ch × (min, neutral, max) uint16 + deadband |
-| 0x16 | Gripper | int16 normalized ×1000 |
+| 0x16 | Gripper | int16 ×1000 — signed open/close **rate** (+open / −close) for the **arm PCB's** servo (§13.4) |
 | 0x1A | Traction command | 2× int16 normalized L/R track speed ×1000 + u8 enable — autonomy `/cmd_vel` |
 
 (0x17–0x19 are the arm lifecycle commands: init / disarm / mode.)
@@ -715,7 +716,7 @@ links.
 | `/robot/estop` | `Bool` | true = e-stop, false = clear |
 | `/joint_states` | `sensor_msgs/JointState` | arm joint positions (rad), forwarded to the arm ESP32 |
 | `/robot/ppm_calib` | `UInt16MultiArray` | 6ch × (min, neutral, max) |
-| `/gripper` | `Float32` | gripper command |
+| `/gripper` | `Float32` | gripper open/close **rate** (+open / −close), routed to the arm PCB as `MSG_GRIPPER` (§13.4) |
 
 ### Published by `gui`
 
@@ -805,7 +806,31 @@ panel.
 **E-stop (Ch6 down)** is level-based: hold the lever down to stop, return it to
 centre to resume (unless a software e-stop is also active). See §16.
 
-### 13.3 The two control loops
+### 13.4 Gripper (end-effector servo, arm PCB)
+
+The gripper is the one actuator driven directly by **PWM** — a single JX
+CLS-12V7346 coreless servo on the **arm PCB's** `GPIO26` (LEDC), one servo moving
+both jaws via a linkage. It is **not** on the CAN bus and **not** part of the arm
+IK. Only the firmware built for the `ARM` board role brings it up.
+
+Command path (workstation-in-the-loop, like the arm joints):
+```
+gamepad RT/LT → joystick_servo (rate = RT − LT, +open/−close)
+  → /gripper (Float32) → esp32_bridge → MSG_GRIPPER (0x16, int16 ×1000)
+  → _send_to_role(ARM) → (serial) → arm ESP32 Gripper module
+  → integrate rate → clamp [GRIPPER_CLOSED_DEG, GRIPPER_OPEN_DEG] → LEDC servo
+```
+Holding RT opens, holding LT closes; the target **steps until a limit**, then
+holds. The firmware integrates at `GRIPPER_RATE_DPS` (config.h) every control
+tick. A stale command (`GRIPPER_CMD_TIMEOUT_MS`) stops stepping; an E-stop freezes
+the servo at its current angle. Power the servo from the **11.1–15 V** rail
+(not the ESP32), common-ground the signal. Bench sketch: `firmware/servo_test`.
+
+> This reverses the legacy `MSG_GRIPPER` direction: it was ESP→PC (an RC value
+> the PC ignored); it is now **PC→ESP**, routed to the arm board (matching the
+> §9.2 / §12 contract).
+
+### 13.5 The two control loops
 
 **Base (closed entirely on the robot, low latency):**
 ```

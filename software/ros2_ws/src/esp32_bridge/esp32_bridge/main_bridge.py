@@ -300,7 +300,6 @@ class ESP32BridgeNode(Node):
         self._pub_lktech = self.create_publisher(Float32MultiArray, '/motors/lktech_status', sensor_qos)
         self._pub_ze300 = self.create_publisher(Float32MultiArray, '/motors/ze300_status', sensor_qos)
         self._pub_odrv_err = self.create_publisher(Float32MultiArray, '/motors/odrive_error', sensor_qos)
-        self._pub_gripper = self.create_publisher(Float32, '/gripper', sensor_qos)
         self._pub_arm_state = self.create_publisher(String, '/arm/state', latched_qos)
         self._pub_arm_fault = self.create_publisher(Bool, '/arm/fault', latched_qos)
         self._pub_arm_presence = self.create_publisher(UInt16, '/arm/can_presence', latched_qos)
@@ -319,6 +318,7 @@ class ESP32BridgeNode(Node):
         self.create_subscription(Bool, '/robot/estop', self._on_estop, 10)
         self.create_subscription(JointState, '/joint_states', self._on_joint_states, 10)
         self.create_subscription(UInt16MultiArray, '/robot/ppm_calib', self._on_ppm_calib, latched_qos)
+        self.create_subscription(Float32, '/gripper', self._on_gripper, 10)
         if self._cmd_vel_enabled:
             self.create_subscription(Twist, '/cmd_vel', self._on_cmd_vel, 10)
             # Watchdog: release the tracks back to RC if /cmd_vel goes stale.
@@ -332,7 +332,6 @@ class ESP32BridgeNode(Node):
             MSG_STATUS: self._handle_status,
             MSG_ENCODER_EXT: self._handle_encoder_ext,
             MSG_VESC_STATUS: self._handle_vesc_status,
-            MSG_GRIPPER: self._handle_gripper,
         }
         self._arm_handlers = {
             MSG_ODRIVE_STATUS: self._handle_odrive_status,
@@ -681,14 +680,6 @@ class ESP32BridgeNode(Node):
         if err != 0:
             self.get_logger().warn(f'ODrive node {node_id} error: 0x{err:016X}')
 
-    def _handle_gripper(self, payload: bytes):
-        if len(payload) < 2:
-            return
-        val1000, = struct.unpack_from('<h', payload)
-        m = Float32()
-        m.data = val1000 / 1000.0
-        self._pub_gripper.publish(m)
-
     def _handle_status(self, payload: bytes):
         if len(payload) < 4:
             return
@@ -822,6 +813,14 @@ class ESP32BridgeNode(Node):
         ]
         payload = struct.pack('<' + 'h' * 6, *[int(d * 100.0) for d in degs])
         self._send_to_role(ROLE_ARM, build_frame(MSG_ARM_JOINTS, payload), 'joint state forwarding')
+
+    def _on_gripper(self, msg: Float32):
+        # Signed gripper open/close rate (+open / −close), clamped to ±1, routed
+        # to the ARM board as MSG_GRIPPER (int16 ×1000). The firmware integrates
+        # it into a clamped servo target, so no rate-limiting is needed here.
+        val = max(-1.0, min(1.0, float(msg.data)))
+        self._send_to_role(ROLE_ARM, build_frame(MSG_GRIPPER, struct.pack('<h', int(val * 1000.0))),
+                           'gripper command')
 
     def _on_cmd_vel(self, msg: Twist):
         # Differential mixing (geometry lives here; the ESP32 reuses the RC path's

@@ -5,6 +5,7 @@
 #include "Sensors.h"
 #include "CANInterface.h"
 #include "Comms.h"
+#include "Gripper.h"
 #include "FlipperCollision.h"
 #include <Arduino.h>
 #include <cmath>
@@ -86,6 +87,14 @@ void Control::begin() {
         (void)p;
 #endif
     });
+    Comms::onGripper([](float rate) {
+#if ROBOCOREA_ROLE_IS_ARM
+        // Gripper open/close rate from the workstation gamepad (RT/LT → MSG_GRIPPER).
+        Gripper::setCommand(rate);
+#else
+        (void)rate;
+#endif
+    });
 
     s_mode = RobotMode::STANDBY;
 }
@@ -99,8 +108,12 @@ void Control::tick() {
 
     if (current == RobotMode::ESTOP) {
         CANInterface::estopArm();
+        Gripper::hold();   // stop stepping; the servo holds its current angle
         return;
     }
+    // Step the end-effector gripper toward its open/close limit. The command's
+    // own timeout halts it if the gamepad link drops; independent of the arm.
+    Gripper::update(1.0f / CONTROL_LOOP_HZ);
     if (joints.valid) CANInterface::sendArmJoints(joints.angle_deg);
     return;
 #else
