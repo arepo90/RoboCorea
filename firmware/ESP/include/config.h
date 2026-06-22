@@ -286,8 +286,8 @@
 #define GRIPPER_PWM_BITS        16     // LEDC duty resolution
 #define GRIPPER_PULSE_MIN_US   500     // 0.5 ms → 0 deg  (JX control-board full range)
 #define GRIPPER_PULSE_MAX_US  2500     // 2.5 ms → 180 deg
-#define GRIPPER_CLOSED_DEG     0.0f    // fully-closed servo angle  (TODO: set mechanically)
-#define GRIPPER_OPEN_DEG     120.0f    // fully-open servo angle    (TODO: set mechanically)
+#define GRIPPER_CLOSED_DEG     40.0f    // fully-closed servo angle  (TODO: set mechanically)
+#define GRIPPER_OPEN_DEG     150.0f    // fully-open servo angle    (TODO: set mechanically)
 #define GRIPPER_RATE_DPS      90.0f    // open/close speed at full trigger (deg/s)
 #define GRIPPER_CMD_TIMEOUT_MS 500     // no fresh command within this → stop stepping (hold)
 
