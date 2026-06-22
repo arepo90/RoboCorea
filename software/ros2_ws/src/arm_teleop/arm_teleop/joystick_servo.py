@@ -124,13 +124,19 @@ class JoystickServo(Node):
             raise ValueError('wrist_slew_rate must be > 0.0.')
 
         self.declare_parameter('gripper_topic', '/gripper')
+        # Gripper open/close on two FREE face buttons (LT/RT/LB/RB are taken by the
+        # wrist). Held = step until limit. Defaults: B opens, A closes; remap via
+        # these params (Xbox: A=0 B=1 X=2 Y=3 LB=4 RB=5 Back=6 Start=7 Guide=8).
+        self.declare_parameter('gripper_open_button', BTN_B)
+        self.declare_parameter('gripper_close_button', BTN_A)
         self.gripper_topic = str(self.get_parameter('gripper_topic').value)
+        self._grip_open_btn = int(self.get_parameter('gripper_open_button').value)
+        self._grip_close_btn = int(self.get_parameter('gripper_close_button').value)
 
         self.twist_pub = self.create_publisher(TwistStamped, self.twist_topic, 10)
         self.joint_pub = self.create_publisher(JointJog, self.joint_topic, 10)
-        # Gripper open/close rate: RT opens, LT closes (+1 open … −1 close).
+        # Gripper open/close rate: open button → +1, close button → −1.
         self.gripper_pub = self.create_publisher(Float32, self.gripper_topic, 10)
-        self._trig_seen = {'lt': False, 'rt': False}
         self._pause_cli = self.create_client(Trigger, self.pause_service)
         self._start_cli = self.create_client(Trigger, self.start_service)
 
@@ -164,6 +170,7 @@ class JoystickServo(Node):
         print('=' * 60)
         print('  CART: LY=+X  LX=+Y  RY=+Z  RX=Yaw  LT/RT=Pitch  LB/RB=Roll')
         print('  JOINT: D-pad Up/Dn select joint, LY jog')
+        print('  GRIPPER: B=open  A=close (hold; any mode)')
         print('  Start=toggle mode   Back=stop   Y=pause/resume   Guide=e-stop')
         print('=' * 60 + '\n')
 
@@ -223,27 +230,13 @@ class JoystickServo(Node):
 
         return apply_unipolar_deadzone(value, self.trigger_deadzone)
 
-    def _trigger_amount(self, axes, idx, key):
-        """Xbox trigger → pressed fraction [0,1]. Triggers idle at +1.0 and go to
-        −1.0 fully pressed, but read 0.0 until first touched — so latch 'seen'
-        once we observe the idle value, otherwise an untouched 0.0 looks
-        half-pressed and the gripper would creep."""
-        if idx >= len(axes):
-            return 0.0
-        a = axes[idx]
-        if a > 0.7:
-            self._trig_seen[key] = True
-        if not self._trig_seen[key]:
-            return 0.0
-        amt = (1.0 - a) / 2.0            # +1 → 0 (idle), −1 → 1 (full press)
-        return 0.0 if amt < 0.05 else max(0.0, min(1.0, amt))
-
-    def _publish_gripper(self, axes, active):
-        """+RT opens, −LT closes; 0 when inactive (e-stop / paused)."""
+    def _publish_gripper(self, buttons, active):
+        """Open button → +1, close button → −1 (held = step until limit);
+        0 when inactive (e-stop / paused) or both/neither pressed."""
         if active:
-            rt = self._trigger_amount(axes, AX_RT, 'rt')
-            lt = self._trigger_amount(axes, AX_LT, 'lt')
-            rate = float(rt - lt)
+            opening = len(buttons) > self._grip_open_btn and buttons[self._grip_open_btn]
+            closing = len(buttons) > self._grip_close_btn and buttons[self._grip_close_btn]
+            rate = float(bool(opening)) - float(bool(closing))
         else:
             rate = 0.0
         self.gripper_pub.publish(Float32(data=rate))
@@ -264,9 +257,9 @@ class JoystickServo(Node):
             self._joy_seen = True
             self._last_joy_time = time.monotonic()
 
-        # Gripper triggers work in any mode; halt them on e-stop / pause.
+        # Gripper buttons work in any mode; halt them on e-stop / pause.
         guide_held = len(buttons) > BTN_GUIDE and buttons[BTN_GUIDE]
-        self._publish_gripper(axes, active=not (guide_held or self._servo_paused))
+        self._publish_gripper(buttons, active=not (guide_held or self._servo_paused))
 
         if len(buttons) > BTN_GUIDE and buttons[BTN_GUIDE]:
             self._publish_zero()
