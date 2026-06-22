@@ -1,0 +1,347 @@
+# Nav2 parameters for the Dicerox tracked rescue robot — Stage A demo.
+#
+# Robot footprint (conservative box, verified against SDF world):
+#   Length (X): 0.74 m  →  ±0.37 m
+#   Width  (Y): 0.53 m  →  ±0.265 m
+#
+# Frame tree:
+#   map → odom → base_footprint → base_link → laser_link
+#                                            → Flipper{1,2,3,4}L
+#
+# All nodes use simulation time. Set use_sim_time: True everywhere.
+
+amcl:
+  ros__parameters:
+    use_sim_time: True
+    # Scan topic — bridged from Gazebo by ros_gz_bridge
+    scan_topic: /scan
+    # Motion model for a differential/tracked robot
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    # Particle filter
+    min_particles: 500
+    max_particles: 3000
+    # Odometry noise model (higher = more trust in LiDAR vs. odometry)
+    alpha1: 0.25   # rot  from rot
+    alpha2: 0.25   # rot  from trans
+    alpha3: 0.20   # trans from trans
+    alpha4: 0.20   # trans from rot
+    alpha5: 0.10   # (strafe — unused for diff drive)
+    # Sensor model
+    laser_model_type: "likelihood_field"
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 12.0
+    laser_min_range: 0.30
+    max_beams: 60
+    # Frame IDs
+    base_frame_id: "base_footprint"
+    global_frame_id: "map"
+    odom_frame_id: "odom"
+    # Convergence / update thresholds
+    update_min_d: 0.20        # min translation (m) before filter update
+    update_min_a: 0.15        # min rotation (rad) before filter update
+    resample_interval: 1
+    transform_tolerance: 1.0
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_fast: 0.10
+    recovery_alpha_slow: 0.001
+    # Sensor weights
+    z_hit: 0.50
+    z_max: 0.05
+    z_rand: 0.45
+    z_short: 0.00
+    sigma_hit: 0.20
+    lambda_short: 0.10
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+    save_pose_rate: 0.5
+    tf_broadcast: true
+    # Initial pose — robot spawns at (0, 0, 0) in the stage_a world.
+    # Set to false to require manual 2D Pose Estimate in RViz instead.
+    set_initial_pose: true
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: True
+    global_frame: map
+    robot_base_frame: base_footprint
+    odom_topic: /odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    wait_for_service_timeout: 1000
+    action_server_result_timeout: 900.0
+    navigators: ['navigate_to_pose', 'navigate_through_poses']
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator/NavigateToPoseNavigator"
+    navigate_through_poses:
+      plugin: "nav2_bt_navigator/NavigateThroughPosesNavigator"
+    # Error codes
+    error_code_names:
+      - compute_path_error_code
+      - follow_path_error_code
+
+controller_server:
+  ros__parameters:
+    use_sim_time: True
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.30
+      yaw_goal_tolerance: 0.30
+
+    # DWB local planner — suitable for tracked/skid-steer robots in Stage A.
+    # In Stage B consider switching to RPP or a MPC controller.
+    FollowPath:
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: True
+      # Linear velocity limits (m/s) — conservative for rescue demo
+      min_vel_x: 0.0
+      min_vel_y: 0.0
+      max_vel_x: 0.40
+      max_vel_y: 0.0       # no lateral motion (tracked robot)
+      max_vel_theta: 0.80
+      min_speed_xy: 0.0
+      max_speed_xy: 0.40
+      min_speed_theta: 0.0
+      # Acceleration limits (m/s², rad/s²)
+      acc_lim_x: 2.0
+      acc_lim_y: 0.0
+      acc_lim_theta: 3.0
+      decel_lim_x: -2.5
+      decel_lim_y: 0.0
+      decel_lim_theta: -3.0
+      # Trajectory sampling
+      vx_samples: 20
+      vy_samples: 1
+      vtheta_samples: 20
+      sim_time: 1.5
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 0.2
+      xy_goal_tolerance: 0.30
+      trans_stopped_velocity: 0.25
+      short_circuit_trajectory_evaluation: True
+      stateful: True
+      critics:
+        ["RotateToGoal", "Oscillation", "BaseObstacle",
+         "GoalAlign",    "PathAlign",   "PathDist", "GoalDist"]
+      BaseObstacle.scale: 0.02
+      PathAlign.scale: 32.0
+      PathAlign.forward_point_distance: 0.1
+      GoalAlign.scale: 24.0
+      GoalAlign.forward_point_distance: 0.1
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: True
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_footprint
+      rolling_window: true
+      width: 4
+      height: 4
+      resolution: 0.05
+      # Conservative footprint for the Dicerox body (excludes flipper arms)
+      footprint: "[[0.37, 0.265], [0.37, -0.265], [-0.37, -0.265], [-0.37, 0.265]]"
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 8.0
+          raytrace_min_range: 0.30
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.30
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        # Inflation radius: robot half-diagonal ~0.46 m, add 0.1 m safety margin
+        inflation_radius: 0.55
+      always_send_full_costmap: True
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: True
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_footprint
+      footprint: "[[0.37, 0.265], [0.37, -0.265], [-0.37, -0.265], [-0.37, 0.265]]"
+      resolution: 0.05
+      track_unknown_space: true
+      # Stage A uses a known static map for global planning. Live LiDAR remains
+      # in the local costmap only, so transient scan returns do not block global paths.
+      plugins: ["static_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
+      always_send_full_costmap: True
+
+map_server:
+  ros__parameters:
+    use_sim_time: True
+    # Absolute path is substituted at launch time by the bringup launch file.
+    yaml_filename: ""
+
+map_saver:
+  ros__parameters:
+    use_sim_time: True
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: True
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 20.0
+    use_sim_time: True
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: false
+      allow_unknown: true
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: True
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: True
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: True
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_footprint
+    transform_tolerance: 0.1
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.80
+    min_rotational_vel: 0.20
+    rotational_acc_lim: 3.0
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: True
+    loop_rate: 20
+    stop_on_failure: false
+    action_server_result_timeout: 900.0
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 200
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: True
+    smoothing_frequency: 20.0
+    scale_velocities: False
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.40, 0.0, 0.80]
+    min_velocity: [-0.10, 0.0, -0.80]
+    max_accel: [2.0, 0.0, 3.0]
+    max_decel: [-2.5, 0.0, -3.0]
+    odom_topic: "/odom"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+collision_monitor:
+  ros__parameters:
+    use_sim_time: True
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "cmd_vel_smoothed"
+    cmd_vel_out_topic: "cmd_vel"
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 0.2
+    source_timeout: 1.0
+    base_shift_correction: True
+    stop_pub_timeout: 2.0
+    polygons: ["FootprintApproach"]
+    FootprintApproach:
+      type: "polygon"
+      action_type: "approach"
+      footprint_topic: "/local_costmap/published_footprint"
+      time_before_collision: 1.5
+      simulation_time_step: 0.02
+      min_points: 6
+      visualize: False
+      enabled: True
+    observation_sources: ["scan"]
+    scan:
+      type: "scan"
+      topic: "/scan"
+
+lifecycle_manager:
+  ros__parameters:
+    use_sim_time: True
+    autostart: True
+    node_names:
+      - map_server
+      - amcl
+      - planner_server
+      - controller_server
+      - smoother_server
+      - behavior_server
+      - bt_navigator
+      - waypoint_follower
+      - velocity_smoother

@@ -1,0 +1,653 @@
+<?xml version="1.0"?>
+<!--
+  Dicerox tracked rescue robot — Stage A simulation description.
+
+  This xacro builds a Stage A Gazebo/Nav2 wrapper around the Dicerox MoveIt model assets with:
+    - base_footprint (ground-contact footprint link, Nav2 base frame)
+    - Dicerox chassis meshes from ros2_moveit_ws/dicerox_urdf_v1
+    - Dicerox arm meshes from ros2_moveit_ws/dicerox_arm_urdf, fixed for Stage A
+    - laser_link     (front-mounted 2-D LiDAR frame)
+    - left/right HIDDEN drive wheels (Stage A locomotion surrogate)
+    - Gazebo Fortress DiffDrive plugin (subscribes /cmd_vel, drives the robot)
+    - Gazebo Fortress GPU LiDAR sensor (publishes Gazebo /scan; bridged to ROS /scan_raw)
+
+  STAGE A SURROGATE NOTE:
+    The Dicerox chassis is entirely track-driven; it has no exposed wheel joints.
+    For Stage A we add two tiny (nearly invisible) continuous joints —
+    left_drive_wheel_joint / right_drive_wheel_joint — so Gazebo's DiffDrive
+    system plugin has the revolving joints it needs to exert forces on the model.
+    These surrogate wheels are placed at the true track centerlines (Y = ±0.265 m)
+    and given a radius matching the effective drive-sprocket radius (0.06 m).
+    Replace/remove them in Stage B when you switch to a proper tracked-vehicle
+    contact plugin.
+
+  COORDINATE CONVENTION (verified from URDF joint positions):
+    X  →  forward  (robot heading)
+    Y  →  left
+    Z  →  up
+
+  KEY PARAMETERS (tune here, not in Nav2 params):
+    track_separation : 0.530 m   (distance between track centrelines)
+    drive_wheel_radius: 0.060 m  (effective sprocket radius for DiffDrive)
+    base_link_z_offset: 0.120 m  (height of base_link origin above ground)
+-->
+<robot name="dicerox" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ======================================================
+       Parameters
+       ====================================================== -->
+  <xacro:property name="track_separation"    value="0.530" />
+  <xacro:property name="drive_wheel_radius"  value="0.060" />
+  <!-- Height of base_link origin above the ground plane.
+       The drive wheels are placed dz = drive_wheel_radius below base_link,
+       so their centres land exactly at wheel_radius above ground. -->
+  <xacro:property name="base_link_z_offset"  value="0.120" />
+
+  <!-- The chassis CAD meshes were exported with +Y as the long/front axis.
+       Rotate chassis visuals so the rendered robot matches the ROS base frame
+       convention of +X forward. -->
+  <xacro:property name="visual_yaw_correction" value="-1.5708" />
+
+  <!-- Laser position relative to base_link.
+       Put the scanner just outside the front hull; if it sits inside the
+       chassis, Gazebo returns a near-field ghost scan from the robot itself. -->
+  <xacro:property name="laser_x"  value="0.500" />
+  <xacro:property name="laser_y"  value="0.000" />
+  <xacro:property name="laser_z"  value="0.150" />
+
+  <!-- ======================================================
+       Materials
+       ====================================================== -->
+  <material name="chassis_grey">
+    <color rgba="0.898 0.918 0.929 1.0" />
+  </material>
+  <material name="flipper_grey">
+    <color rgba="0.753 0.753 0.753 1.0" />
+  </material>
+  <material name="laser_black">
+    <color rgba="0.1 0.1 0.1 1.0" />
+  </material>
+  <!-- Surrogate wheels are made nearly transparent so they are invisible -->
+  <material name="invisible">
+    <color rgba="0.0 0.0 0.0 0.0" />
+  </material>
+
+  <!-- ======================================================
+       base_footprint — flat footprint at ground level.
+       This is the Nav2 / AMCL base frame.
+       It contains no geometry; robot_state_publisher broadcasts
+       the fixed joint from here up to base_link.
+       ====================================================== -->
+  <link name="base_footprint">
+    <!-- Intentionally empty: footprint is a virtual frame. -->
+  </link>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint" />
+    <child  link="base_link" />
+    <!-- Lift the physical robot body above the ground plane. -->
+    <origin xyz="0 0 ${base_link_z_offset}" rpy="0 0 0" />
+  </joint>
+
+  <!-- ======================================================
+       base_link — main chassis using the ros2_moveit_ws Dicerox mesh.
+       Collision uses a conservative box for Stage A stability.
+       ====================================================== -->
+  <link name="base_link">
+    <inertial>
+      <!-- Inertia from original SolidWorks export. -->
+      <origin xyz="-6.0962E-06 -0.0098619 0.019556" rpy="0 0 0" />
+      <mass value="23.384" />
+      <inertia
+        ixx="0.45314"  ixy="-3.9592E-07" ixz="6.5591E-07"
+        iyy="0.092646" iyz="2.3142E-05"
+        izz="0.4283" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 ${visual_yaw_correction}" />
+      <geometry>
+        <!-- Original Dicerox mesh. Meshes live in the dicerox_urdf_v1 package from ros2_moveit_ws. -->
+        <mesh filename="file://$(find dicerox_urdf_v1)/meshes/visual/base_link.STL" />
+      </geometry>
+      <material name="chassis_grey" />
+    </visual>
+    <collision>
+      <!-- Stage A: simplified support box for reliable flat-ground physics.
+           The -3 cm Z offset places the box bottom at ground height when
+           base_link_z_offset=0.120, reducing pitch from the center wheel surrogate. -->
+      <origin xyz="0 0 -0.03" rpy="0 0 0" />
+      <geometry>
+        <box size="0.74 0.53 0.18" />
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ======================================================
+       Flippers — 4 revolute joints from original URDF.
+       lower=upper=0  →  effectively fixed in Stage A.
+       Expand limits in Stage B for climbing control.
+
+       Naming map:
+         Flipper1J / Flipper1L  →  front-left  flipper
+         Flipper2J / Flipper2L  →  front-right flipper
+         Flipper3J / Flipper3L  →  rear-left   flipper
+         Flipper4J / Flipper4L  →  rear-right  flipper
+       ====================================================== -->
+
+  <!-- Front-left flipper -->
+  <link name="Flipper1L">
+    <inertial>
+      <origin xyz="-0.038777 0.11447 4.8819E-06" rpy="0 0 0" />
+      <mass value="2.2681" />
+      <inertia
+        ixx="0.030289" ixy="5.4004E-06"  ixz="-3.6002E-09"
+        iyy="0.0072507" iyz="5.3367E-07"
+        izz="0.025427" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="3.14159 3.14159 3.14159" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_urdf_v1)/meshes/visual/Flipper1L.STL" />
+      </geometry>
+      <material name="flipper_grey" />
+    </visual>
+    <collision>
+      <!-- Stage A: tiny non-support collision so flipper visuals do not lift/pitch the chassis. -->
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.02 0.02 0.02" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Flipper1J" type="revolute">
+    <origin xyz="0.265 0.37013 0" rpy="3.1416 0 1.5708" />
+    <parent link="base_link" />
+    <child  link="Flipper1L" />
+    <axis xyz="1 0 0" />
+    <!-- Stage A: keep flippers physically locked in Gazebo. -->
+    <limit lower="0.0" upper="0.0" effort="100.0" velocity="1.0" />
+    <dynamics damping="0.5" friction="0.1" />
+  </joint>
+
+  <!-- Front-right flipper -->
+  <link name="Flipper2L">
+    <inertial>
+      <origin xyz="0.038777 0.11447 -4.8819E-06" rpy="0 0 0" />
+      <mass value="2.2681" />
+      <inertia
+        ixx="0.030289" ixy="-5.4004E-06" ixz="-3.6002E-09"
+        iyy="0.0072507" iyz="-5.3367E-07"
+        izz="0.025427" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="3.14159 3.14159 3.14159" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_urdf_v1)/meshes/visual/Flipper2L.STL" />
+      </geometry>
+      <material name="flipper_grey" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.02 0.02 0.02" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Flipper2J" type="revolute">
+    <origin xyz="0.265 -0.37013 0" rpy="3.1416 0 1.5708" />
+    <parent link="base_link" />
+    <child  link="Flipper2L" />
+    <axis xyz="-1 0 0" />
+    <limit lower="0.0" upper="0.0" effort="100.0" velocity="1.0" />
+    <dynamics damping="0.5" friction="0.1" />
+  </joint>
+
+  <!-- Rear-left flipper -->
+  <link name="Flipper3L">
+    <inertial>
+      <origin xyz="-0.038777 0.11447 4.8819E-06" rpy="0 0 0" />
+      <mass value="2.2681" />
+      <inertia
+        ixx="0.030289" ixy="5.4004E-06"  ixz="-3.6002E-09"
+        iyy="0.0072507" iyz="5.3367E-07"
+        izz="0.025427" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="3.14159 3.14159 3.14159" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_urdf_v1)/meshes/visual/Flipper3L.STL" />
+      </geometry>
+      <material name="flipper_grey" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.02 0.02 0.02" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Flipper3J" type="revolute">
+    <origin xyz="-0.265 0.37013 0" rpy="3.1416 0 1.5708" />
+    <parent link="base_link" />
+    <child  link="Flipper3L" />
+    <axis xyz="1 0 0" />
+    <limit lower="0.0" upper="0.0" effort="100.0" velocity="1.0" />
+    <dynamics damping="0.5" friction="0.1" />
+  </joint>
+
+  <!-- Rear-right flipper -->
+  <link name="Flipper4L">
+    <inertial>
+      <origin xyz="0.038777 0.11447 -4.8819E-06" rpy="0 0 0" />
+      <mass value="2.2681" />
+      <inertia
+        ixx="0.030289" ixy="-5.4004E-06" ixz="-3.6002E-09"
+        iyy="0.0072507" iyz="-5.3367E-07"
+        izz="0.025427" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="3.14159 3.14159 3.14159" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_urdf_v1)/meshes/visual/Flipper4L.STL" />
+      </geometry>
+      <material name="flipper_grey" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.02 0.02 0.02" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Flipper4J" type="revolute">
+    <origin xyz="-0.265 -0.37013 0" rpy="3.1416 0 1.5708" />
+    <parent link="base_link" />
+    <child  link="Flipper4L" />
+    <axis xyz="-1 0 0" />
+    <limit lower="0.0" upper="0.0" effort="100.0" velocity="1.0" />
+    <dynamics damping="0.5" friction="0.1" />
+  </joint>
+
+
+
+  <!-- ======================================================
+       Dicerox arm from ros2_moveit_ws/dicerox_arm_urdf.
+       Stage A fixes the arm joints at the MoveIt zero pose so Gazebo/Nav2
+       can use the full robot shape without requiring arm controllers.
+       The movable arm remains available in ros2_moveit_ws/dicerox_moveit.
+       ====================================================== -->
+  <joint name="arm_mount_joint" type="fixed">
+    <parent link="base_link" />
+    <child  link="arm_base_link" />
+    <!-- Derived from dicerox_moveit/config/Dicerox_robot_arm_URDF.urdf.xacro:
+         chassis_mount_xyz="-0.14 0 -0.14", chassis_mount_rpy="0 0 -1.5708". -->
+    <origin xyz="0.14 0 0.14" rpy="3.141592653589793 0 0" />
+  </joint>
+  <link name="arm_base_link">
+    <inertial>
+      <origin xyz="-9.49825873871185E-05 -1.04297722111363E-06 0.0144742771636322" rpy="0 0 0" />
+      <mass value="0.616927576087879" />
+      <inertia ixx="0.00235120961653514" ixy="1.48592051070372E-08" ixz="1.72093144714663E-07" iyy="0.000752293306588767" iyz="8.93709469162573E-10" izz="0.0030503193907466" />
+    </inertial>
+    <!-- Visual and collision geometry intentionally omitted:
+         the chassis URDF (dicerox_urdf_v1) provides the complete base_link mesh.
+         Keeping geometry here would cause duplicate/overlapping models in RViz. -->
+  </link>
+  <link name="Link1">
+    <inertial>
+      <origin xyz="-1.5987E-06 0.024748 -0.061373" rpy="0 0 0" />
+      <mass value="0.40272" />
+      <inertia ixx="0.00020115" ixy="8.9742E-10" ixz="1.4855E-08" iyy="0.00029101" iyz="5.2612E-06" izz="0.00020797" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/visual/Link1.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/collision/Link1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Joint1" type="fixed">
+    <origin xyz="0 0 -0.02135" rpy="0 0 0" />
+    <parent link="arm_base_link" />
+    <child link="Link1" />
+  </joint>
+  <link name="Link2">
+    <inertial>
+      <origin xyz="-0.243045429859638 -0.0135631154060198 0.0109133250229265" rpy="0 0 0" />
+      <mass value="0.850434760512325" />
+      <inertia ixx="0.000566538415993394" ixy="-0.000197628674376634" ixz="5.15412905692302E-05" iyy="0.00151204564961416" iyz="-2.74040675259699E-05" izz="0.0016954901326145" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/visual/Link2.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/collision/Link2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Joint2" type="fixed">
+    <origin xyz="0 0 -0.085" rpy="-1.5708 -0.0523599 0" />
+    <parent link="Link1" />
+    <child link="Link2" />
+  </joint>
+  <link name="Link3">
+    <inertial>
+      <origin xyz="0.144477857773968 0.0250963518852683 -0.00383266973549601" rpy="0 0 0" />
+      <mass value="0.583243866421534" />
+      <inertia ixx="0.000369010255911609" ixy="-7.60066997552285E-05" ixz="-5.44971341604371E-05" iyy="0.000787611709577075" iyz="-9.53787377811168E-06" izz="0.000837010731417748" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/visual/Link3.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/collision/Link3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Joint3" type="fixed">
+    <origin xyz="-0.37445 0.024154 0" rpy="0 0 -0.064417" />
+    <parent link="Link2" />
+    <child link="Link3" />
+  </joint>
+  <link name="Link4">
+    <inertial>
+      <origin xyz="0.0017238 0.0060777 -0.34018" rpy="0 0 0" />
+      <mass value="0.1006" />
+      <inertia ixx="3.1596E-05" ixy="-1.2772E-07" ixz="3.2611E-07" iyy="4.0916E-05" iyz="3.9956E-06" izz="2.3493E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/visual/Link4.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/collision/Link4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Joint4" type="fixed">
+    <origin xyz="0 0 0" rpy="-1.5708 0 1.7395" />
+    <parent link="Link3" />
+    <child link="Link4" />
+  </joint>
+  <link name="Link5">
+    <inertial>
+      <origin xyz="0.0016612 -0.035686 0.0044302" rpy="0 0 0" />
+      <mass value="0.1131" />
+      <inertia ixx="4.1087E-05" ixy="-6.719E-10" ixz="2.8114E-08" iyy="4.0687E-05" iyz="-7.1084E-06" izz="3.4714E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/visual/Link5.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/collision/Link5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Joint5" type="fixed">
+    <origin xyz="0 0 -0.345" rpy="1.5708 0 0" />
+    <parent link="Link4" />
+    <child link="Link5" />
+  </joint>
+  <link name="Link6">
+    <inertial>
+      <origin xyz="0.00035634 2.3759E-05 0.066312" rpy="0 0 0" />
+      <mass value="0.25036" />
+      <inertia ixx="0.0001021" ixy="-3.1303E-08" ixz="1.6229E-07" iyy="9.1239E-05" iyz="5.6802E-07" izz="5.7902E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/visual/Link6.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.75294 0.75294 0.75294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="file://$(find dicerox_arm_urdf)/meshes/collision/Link6.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Joint6" type="fixed">
+    <origin xyz="0 -0.189 0" rpy="-1.5708 0 0" />
+    <parent link="Link5" />
+    <child link="Link6" />
+  </joint>
+
+  <!-- ======================================================
+       laser_link — 2-D LiDAR sensor frame.
+       Mounted at the front-centre of the robot, 15 cm above base_link.
+       ====================================================== -->
+  <link name="laser_link">
+    <!-- Empty sensor frame. Do not add visual/collision geometry here:
+         a GPU LiDAR at the centre of its own cylinder can see that cylinder
+         as a fake circular obstacle in RViz/Nav2. -->
+  </link>
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link" />
+    <child  link="laser_link" />
+    <origin xyz="${laser_x} ${laser_y} ${laser_z}" rpy="0 0 0" />
+  </joint>
+
+  <!-- ======================================================
+       Stage A Locomotion Surrogate — hidden drive wheels.
+
+       Two tiny continuous joints (one per track centreline) give the
+       Gazebo DiffDrive system plugin the revolving joints it needs.
+       Visual alpha = 0 → invisible in RViz.  Radius = drive_wheel_radius.
+       Placed dz = -drive_wheel_radius below base_link so their centres
+       are exactly drive_wheel_radius above the ground plane.
+
+       REMOVE in Stage B and switch to TrackedVehicle plugin.
+       ====================================================== -->
+
+  <!-- Left drive wheel -->
+  <link name="left_drive_wheel_link">
+    <inertial>
+      <mass value="0.100" />
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0" />
+      <geometry>
+        <!-- Tiny cylinder — nearly invisible at 5 mm radius -->
+        <cylinder radius="0.005" length="0.005" />
+      </geometry>
+      <material name="invisible" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0" />
+      <geometry>
+        <cylinder radius="${drive_wheel_radius}" length="0.05" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_drive_wheel_joint" type="continuous">
+    <parent link="base_link" />
+    <child  link="left_drive_wheel_link" />
+    <!-- Y = +track_separation/2  (left),  Z = -drive_wheel_radius (ground contact) -->
+    <origin xyz="0 ${track_separation/2} ${-drive_wheel_radius}" rpy="0 0 0" />
+    <axis xyz="0 1 0" />
+    <dynamics damping="0.01" friction="0.01" />
+  </joint>
+
+  <!-- Right drive wheel -->
+  <link name="right_drive_wheel_link">
+    <inertial>
+      <mass value="0.100" />
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0" />
+      <geometry>
+        <cylinder radius="0.005" length="0.005" />
+      </geometry>
+      <material name="invisible" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0" />
+      <geometry>
+        <cylinder radius="${drive_wheel_radius}" length="0.05" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_drive_wheel_joint" type="continuous">
+    <parent link="base_link" />
+    <child  link="right_drive_wheel_link" />
+    <origin xyz="0 ${-track_separation/2} ${-drive_wheel_radius}" rpy="0 0 0" />
+    <axis xyz="0 1 0" />
+    <dynamics damping="0.01" friction="0.01" />
+  </joint>
+
+  <!-- ======================================================
+       Gazebo Fortress — physics material for chassis
+       ====================================================== -->
+  <gazebo reference="base_link">
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+    <kp>1e6</kp>
+    <kd>100.0</kd>
+  </gazebo>
+
+  <!-- Drive wheel ground contact: high friction so DiffDrive exerts force -->
+  <gazebo reference="left_drive_wheel_link">
+    <mu1>1.5</mu1>
+    <mu2>1.5</mu2>
+    <kp>1e6</kp>
+    <kd>100.0</kd>
+  </gazebo>
+  <gazebo reference="right_drive_wheel_link">
+    <mu1>1.5</mu1>
+    <mu2>1.5</mu2>
+    <kp>1e6</kp>
+    <kd>100.0</kd>
+  </gazebo>
+
+  <!-- ======================================================
+       Gazebo Fortress — DiffDrive system plugin.
+
+       Subscribes to /cmd_vel (ROS→IGN bridge).
+       Publishes odometry on /model/dicerox/odom_gz (NOT bridged, so it
+       does NOT conflict with our custom tracked_odom ROS node).
+       ====================================================== -->
+  <gazebo>
+    <plugin
+      filename="ignition-gazebo-diff-drive-system"
+      name="ignition::gazebo::systems::DiffDrive">
+      <left_joint>left_drive_wheel_joint</left_joint>
+      <right_joint>right_drive_wheel_joint</right_joint>
+      <wheel_separation>${track_separation}</wheel_separation>
+      <wheel_radius>${drive_wheel_radius}</wheel_radius>
+      <!-- Subscribe to the bridged /cmd_vel topic -->
+      <topic>/cmd_vel</topic>
+      <!-- Publish internal odom to a non-bridged topic.
+           Our tracked_odom ROS node owns /odom. -->
+      <odom_topic>/model/dicerox/odom_gz</odom_topic>
+      <tf_topic>/model/dicerox/tf_gz</tf_topic>
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_footprint</child_frame_id>
+      <odom_publish_frequency>50</odom_publish_frequency>
+      <!-- Acceleration limits — appropriate for a 23 kg tracked robot -->
+      <max_linear_acceleration>1.5</max_linear_acceleration>
+    </plugin>
+  </gazebo>
+
+  <!-- ======================================================
+       Gazebo Fortress — JointStatePublisher system plugin.
+       Publishes all joint positions on the IGN topic
+       /world/<world>/model/dicerox/joint_state.
+       (Not bridged; the ROS joint_state_publisher handles ROS side.)
+       ====================================================== -->
+  <gazebo>
+    <plugin
+      filename="ignition-gazebo-joint-state-publisher-system"
+      name="ignition::gazebo::systems::JointStatePublisher">
+    </plugin>
+  </gazebo>
+
+  <!-- ======================================================
+       Gazebo Fortress — 2-D GPU LiDAR sensor.
+
+       Publishes on IGN topic /scan (absolute path).
+       The ros_gz_bridge maps Gazebo /scan -> ROS /scan_raw; scan_sanitizer_node republishes cleaned /scan.
+       frame_id is set to laser_link to match the URDF TF frame.
+       ====================================================== -->
+  <gazebo reference="laser_link">
+    <sensor name="lidar" type="gpu_lidar">
+      <!-- Absolute IGN topic so the bridge can map it cleanly -->
+      <topic>/scan</topic>
+      <!-- Force the bridged LaserScan frame to the URDF TF frame. -->
+      <gz_frame_id>laser_link</gz_frame_id>
+      <update_rate>10</update_rate>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <lidar>
+        <scan>
+          <horizontal>
+            <!-- Front-facing 180 degree scan.
+                 A full 360 degree scan from a front-mounted sensor sees the
+                 robot body/arm behind the sensor and creates self-obstacle ghosts. -->
+            <samples>181</samples>
+            <resolution>1</resolution>
+            <min_angle>-1.57079633</min_angle>
+            <max_angle>1.57079633</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.30</min>
+          <max>12.0</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </lidar>
+      <pose relative_to="laser_link">0 0 0 0 0 0</pose>
+    </sensor>
+  </gazebo>
+
+</robot>

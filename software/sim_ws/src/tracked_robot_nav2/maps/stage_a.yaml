@@ -1,0 +1,10 @@
+# Nav2 map_server map descriptor for Stage A.
+# Matches the stage_a.sdf Gazebo world (20 m × 20 m, 0.10 m/pixel).
+#
+# image path is relative to this yaml file.
+image: stage_a.pgm
+resolution: 0.10       # metres per pixel
+origin: [-10.0, -10.0, 0.0]   # [x, y, yaw] of bottom-left pixel in world frame
+negate: 0              # 0 = white (255) means free, black (0) means occupied
+occupied_thresh: 0.65  # pixels with occ probability > this are obstacles
+free_thresh: 0.196     # pixels with occ probability < this are free

@@ -1,0 +1,27 @@
+# ros_gz_bridge parameter configuration for Stage A demo.
+#
+# Direction notation (ros_gz_bridge):
+#   [  = IGN  → ROS   (Gazebo publishes, ROS consumes)
+#   ]  = ROS  → IGN   (ROS publishes, Gazebo/plugin consumes)
+#
+# This file is passed to ros_gz_bridge via the --ros-args -p config_file:= parameter.
+
+- ros_topic_name: /clock
+  gz_topic_name: /clock
+  ros_type_name: rosgraph_msgs/msg/Clock
+  gz_type_name: ignition.msgs.Clock
+  direction: GZ_TO_ROS
+
+# LiDAR — sensor publishes on /scan in IGN; ROS filter republishes clean /scan.
+- ros_topic_name: /scan_raw
+  gz_topic_name: /scan
+  ros_type_name: sensor_msgs/msg/LaserScan
+  gz_type_name: ignition.msgs.LaserScan
+  direction: GZ_TO_ROS
+
+# cmd_vel — Nav2 controller publishes on ROS /cmd_vel → DiffDrive plugin reads it in IGN
+- ros_topic_name: /cmd_vel
+  gz_topic_name: /cmd_vel
+  ros_type_name: geometry_msgs/msg/Twist
+  gz_type_name: ignition.msgs.Twist
+  direction: ROS_TO_GZ

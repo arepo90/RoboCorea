@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>tracked_robot_odom</name>
+  <version>0.1.0</version>
+  <description>
+    Simple planar tracked-robot odometry node for the Dicerox Stage A demo.
+
+    Implements the kinematic model:
+      v_L = v - omega * track_separation / 2
+      v_R = v + omega * track_separation / 2
+    where v and omega come from /cmd_vel.  The pose is integrated and
+    published as nav_msgs/Odometry on /odom plus the odom->base_footprint TF.
+  </description>
+  <maintainer email="gerardodelcid16@gmail.com">Gerardo Escobar</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

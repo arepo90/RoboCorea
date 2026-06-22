@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>tracked_robot_bringup</name>
+  <version>0.1.0</version>
+  <description>
+    Top-level bringup package for the Dicerox tracked rescue robot Stage A demo.
+    The main entry point is:
+        ros2 launch tracked_robot_bringup stage_a_demo.launch.py
+  </description>
+  <maintainer email="gerardodelcid16@gmail.com">Gerardo Escobar</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>tracked_robot_description</exec_depend>
+  <exec_depend>tracked_robot_gz</exec_depend>
+  <exec_depend>tracked_robot_odom</exec_depend>
+  <exec_depend>tracked_robot_nav2</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

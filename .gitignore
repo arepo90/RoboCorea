@@ -12,6 +12,10 @@ reference/TMR2026_Rescue/
 software/ros2_ws/build/
 software/ros2_ws/install/
 software/ros2_ws/log/
+# Gazebo + Nav2 simulation workspace (separate colcon ws, not built on the robot)
+software/sim_ws/build/
+software/sim_ws/install/
+software/sim_ws/log/
 .colcon_install_layout
 
 # ── Python ───────────────────────────────────────────────────────────────────

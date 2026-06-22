@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="robocup2026_world">
+    <static>true</static>
+
+    <!--
+      Source: RoboCup2026v5 2.dae exported from SketchUp.
+      The mesh coordinates are millimeter-scale and offset from the origin.
+      scale=0.001 converts mm to m. The link pose recenters the floor plan in X/Y
+      and lifts the lowest mesh vertex to approximately z=0.
+
+      Raw mesh rough bounds before scaling:
+        x: -1579.854 .. 8929.655 mm
+        y: -7536.207 .. 6986.688 mm
+        z: -6961.098 .. 5667.750 mm
+    -->
+    <pose>-3.674901 0.274759 6.961098 0 0 0</pose>
+    <link name="arena_link">
+      <visual name="arena_visual">
+        <geometry>
+          <mesh>
+            <uri>model://robocup2026_world/meshes/robocup2026_world.dae</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </visual>
+
+      <!-- Visual-only for first import validation. Mesh collision can make
+           Gazebo appear blank or frozen on complex SketchUp exports. Add
+           simplified box collisions after scale/orientation are verified. -->
+    </link>
+  </model>
+</sdf>
