@@ -1,0 +1,14 @@
+[Unit]
+Description=RoboCorea robot manager (sensor start/stop service for the GUI)
+# Always-on controller: it is NOT PartOf rescue-sensors.target — it must stay up
+# to receive start/stop requests even when the sensors are stopped.
+
+[Service]
+# Must match the workstation/GUI domain.
+Environment=ROS_DOMAIN_ID=20
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 run rescue_bringup robot_manager'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

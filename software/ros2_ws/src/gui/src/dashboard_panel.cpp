@@ -318,6 +318,45 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         layout->addLayout(arm_btn_row);
     }
 
+    // ── Sensor stack (ZED + RPLidar; started/stopped on the Jetson via systemd) ─
+    add_hsep();
+    {
+        auto* sens_hdr_row = new QHBoxLayout();
+        auto* sens_hdr = new QLabel("Sensors", this);
+        sens_hdr->setStyleSheet(hdr_style);
+        sensors_indicator_ = new QLabel("●", this);
+        sensors_indicator_->setStyleSheet("color: #888; font-size: 14px;");
+        sensors_label_ = new QLabel("—", this);
+        sensors_label_->setStyleSheet("color: #888; font-size: 12px;");
+        sens_hdr_row->addWidget(sens_hdr);
+        sens_hdr_row->addStretch();
+        sens_hdr_row->addWidget(sensors_indicator_);
+        sens_hdr_row->addWidget(sensors_label_);
+        layout->addLayout(sens_hdr_row);
+
+        auto* sens_btn_row = new QHBoxLayout();
+        sens_btn_row->setSpacing(4);
+
+        sensors_start_btn_ = new QPushButton("Start ZED+Lidar", this);
+        sensors_start_btn_->setMinimumHeight(28);
+        sensors_start_btn_->setToolTip("Start the ZED + RPLidar stack on the robot "
+                                       "(systemd rescue-sensors.target via robot_manager)");
+        sensors_start_btn_->setStyleSheet(btn_style("#1a5a2a", "#2a7a3a", "#0a3a1a"));
+        connect(sensors_start_btn_, &QPushButton::clicked, this,
+                &DashboardPanel::onSensorsStartClicked);
+        sens_btn_row->addWidget(sensors_start_btn_);
+
+        sensors_stop_btn_ = new QPushButton("Stop", this);
+        sensors_stop_btn_->setMinimumHeight(28);
+        sensors_stop_btn_->setToolTip("Cleanly stop the ZED + RPLidar stack on the robot");
+        sensors_stop_btn_->setStyleSheet(btn_style("#5a2a2a", "#7a3a3a", "#3a1a1a"));
+        connect(sensors_stop_btn_, &QPushButton::clicked, this,
+                &DashboardPanel::onSensorsStopClicked);
+        sens_btn_row->addWidget(sensors_stop_btn_);
+
+        layout->addLayout(sens_btn_row);
+    }
+
     auto* btn_row = new QHBoxLayout();
     btn_row->setSpacing(4);
 
@@ -389,6 +428,17 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     arm_disarm_cli_    = node_->create_client<std_srvs::srv::Trigger>("/arm/disarm");
     arm_dexterity_cli_ = node_->create_client<std_srvs::srv::Trigger>("/arm/mode/dexterity");
     arm_chassis_cli_   = node_->create_client<std_srvs::srv::Trigger>("/arm/mode/chassis");
+
+    // ── Sensor stack (robot_manager on the Jetson) ───────────────────────────
+    connect(this, &DashboardPanel::sensorsStatusUpdated,
+            this, &DashboardPanel::onSensorsStatusUpdated, Qt::QueuedConnection);
+    sensors_status_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/robot/sensors/status", arm_qos,
+        [this](std_msgs::msg::String::SharedPtr msg) {
+            emit sensorsStatusUpdated(QString::fromStdString(msg->data));
+        });
+    sensors_start_cli_ = node_->create_client<std_srvs::srv::Trigger>("/robot/sensors/start");
+    sensors_stop_cli_  = node_->create_client<std_srvs::srv::Trigger>("/robot/sensors/stop");
 }
 
 void DashboardPanel::setConnState(const QString& color, const QString& label)
@@ -593,4 +643,50 @@ void DashboardPanel::onArmPresenceUpdated(int mask)
             QString("color: %1; font-size: 10px; font-weight: bold;")
                 .arg(present ? "#33cc33" : "#cc3333"));
     }
+}
+
+// ── Sensor stack (ZED + RPLidar via the Jetson robot_manager) ────────────────
+void DashboardPanel::onSensorsStartClicked()
+{
+    if (!sensors_start_cli_->service_is_ready()) {
+        RCLCPP_WARN(node_->get_logger(),
+                    "Sensors start requested but the service is unavailable "
+                    "(is robot_manager running on the Jetson?)");
+        return;
+    }
+    sensors_start_cli_->async_send_request(
+        std::make_shared<std_srvs::srv::Trigger::Request>());
+    RCLCPP_INFO(node_->get_logger(), "Sensors: start requested");
+}
+
+void DashboardPanel::onSensorsStopClicked()
+{
+    if (!sensors_stop_cli_->service_is_ready()) {
+        RCLCPP_WARN(node_->get_logger(),
+                    "Sensors stop requested but the service is unavailable "
+                    "(is robot_manager running on the Jetson?)");
+        return;
+    }
+    sensors_stop_cli_->async_send_request(
+        std::make_shared<std_srvs::srv::Trigger::Request>());
+    RCLCPP_INFO(node_->get_logger(), "Sensors: stop requested");
+}
+
+void DashboardPanel::onSensorsStatusUpdated(const QString& status)
+{
+    // status is "<overall> (zed=… lidar=…)"; the leading word drives the LED.
+    sensors_label_->setText(status);
+    const QString s = status.section(' ', 0, 0);
+
+    QString color = "#888";          // inactive / unknown
+    if (s == "active")           color = "#33cc33";
+    else if (s == "activating")  color = "#ccaa00";
+    else if (s == "partial")     color = "#ccaa00";
+    else if (s == "failed")      color = "#cc3333";
+    sensors_indicator_->setStyleSheet(QString("color: %1; font-size: 14px;").arg(color));
+    sensors_label_->setStyleSheet(QString("color: %1; font-size: 12px;").arg(color));
+
+    const bool active = (s == "active");
+    sensors_start_btn_->setEnabled(!active && s != "activating");
+    sensors_stop_btn_->setEnabled(s != "inactive");
 }

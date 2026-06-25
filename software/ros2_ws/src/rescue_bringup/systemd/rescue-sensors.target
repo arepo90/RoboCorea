@@ -1,0 +1,4 @@
+[Unit]
+Description=RoboCorea sensor frontend (ZED + RPLidar)
+# zed.service and lidar.service declare `PartOf=` + `WantedBy=` this target, so
+# starting it starts both and stopping/restarting it propagates to both.

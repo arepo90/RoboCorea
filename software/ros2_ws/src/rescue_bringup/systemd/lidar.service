@@ -1,0 +1,17 @@
+[Unit]
+Description=RoboCorea RPLidar driver
+PartOf=rescue-sensors.target
+
+[Service]
+# Must match the workstation/GUI domain (and the other robot nodes).
+Environment=ROS_DOMAIN_ID=20
+# %h = the user's home. Adjust the workspace path if yours differs.
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch sllidar_ros2 sllidar_a2m12_launch.py serial_port:=/dev/rplidar'
+# Graceful SIGINT first (clean node teardown), then the cgroup is SIGKILLed.
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=10
+Restart=no
+
+[Install]
+WantedBy=rescue-sensors.target
