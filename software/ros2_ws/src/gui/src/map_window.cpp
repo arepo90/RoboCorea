@@ -72,19 +72,27 @@ void MapWindow::onMapUpdated() { update(); }
 
 void MapWindow::onTick()
 {
-    // map -> base_link gives the robot pose in the map frame.
-    try {
-        auto tf = tf_buffer_->lookupTransform(
-            map_frame_, base_frame_, tf2::TimePointZero);
-        robot_x_ = tf.transform.translation.x;
-        robot_y_ = tf.transform.translation.y;
-        const auto& q = tf.transform.rotation;   // planar yaw from quaternion
-        robot_yaw_ = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
-                                1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-        have_pose_ = true;
-    } catch (const tf2::TransformException&) {
-        have_pose_ = false;
+    // Robot pose in the map frame. The mapping_ekf stack's chain ends at
+    // base_footprint (map->odom->base_footprint->base_laser, no base_link); the
+    // rescue_nav frontend chain has base_link too. Try base_footprint first,
+    // fall back to base_link, so both launch paths work.
+    static const char* base_candidates[] = {"base_footprint", "base_link"};
+    bool ok = false;
+    for (const char* bf : base_candidates) {
+        try {
+            auto tf = tf_buffer_->lookupTransform(map_frame_, bf, tf2::TimePointZero);
+            robot_x_ = tf.transform.translation.x;
+            robot_y_ = tf.transform.translation.y;
+            const auto& q = tf.transform.rotation;   // planar yaw from quaternion
+            robot_yaw_ = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
+                                    1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+            ok = true;
+            break;
+        } catch (const tf2::TransformException&) {
+            // try the next candidate
+        }
     }
+    have_pose_ = ok;
     update();
 }
 
@@ -155,7 +163,7 @@ void MapWindow::paintEvent(QPaintEvent*)
               .arg(robot_x_, 0, 'f', 2).arg(robot_y_, 0, 'f', 2)
               .arg(robot_yaw_ * 180.0 / M_PI, 0, 'f', 0)
               .arg(follow_ ? "[follow]" : "")
-        : QString("no robot pose (TF map→base_link)   %1")
+        : QString("no robot pose (TF map→base_footprint)   %1")
               .arg(follow_ ? "[follow]" : "");
     p.drawText(8, 18, hud);
     p.drawText(8, height() - 10, "drag: pan   wheel: zoom   F: follow   R: reset");

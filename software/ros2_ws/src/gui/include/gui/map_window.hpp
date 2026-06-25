@@ -72,7 +72,6 @@ private:
     // Frames + robot footprint (metres). Footprint stands in for the full body
     // in this top-down view; sized to the rescue base by default.
     std::string map_frame_{"map"};
-    std::string base_frame_{"base_link"};
     double robot_len_{0.6};
     double robot_wid_{0.5};
 };
