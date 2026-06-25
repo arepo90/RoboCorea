@@ -57,6 +57,8 @@ signals:
     void armStateUpdated(const QString& state);
     void armModeUpdated(const QString& mode);
     void armPresenceUpdated(int mask);
+    // Sensor stack lifecycle (ZED + RPLidar via the Jetson robot_manager).
+    void sensorsStatusUpdated(const QString& status);
 
 public slots:
     // Called by VideoPanel when any widget selects/deselects the thermal source.
@@ -81,6 +83,10 @@ private slots:
     void onArmClicked();
     void onDisarmClicked();
     void onArmModeToggle();
+    // Sensor stack
+    void onSensorsStatusUpdated(const QString& status);
+    void onSensorsStartClicked();
+    void onSensorsStopClicked();
 
 private:
     void setConnState(const QString& color, const QString& label);
@@ -152,4 +158,13 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_disarm_cli_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_dexterity_cli_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_chassis_cli_;
+
+    // ── Sensor stack (ZED + RPLidar, started/stopped on the Jetson via systemd) ─
+    QLabel*      sensors_indicator_{nullptr};   // colored LED
+    QLabel*      sensors_label_{nullptr};       // active / inactive / activating / …
+    QPushButton* sensors_start_btn_{nullptr};
+    QPushButton* sensors_stop_btn_{nullptr};
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sensors_status_sub_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr sensors_start_cli_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr sensors_stop_cli_;
 };

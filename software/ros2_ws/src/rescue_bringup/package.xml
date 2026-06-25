@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<package format="3">
+  <name>rescue_bringup</name>
+  <version>0.1.0</version>
+  <description>
+    Per-host bringup for RoboCorea: systemd units for the sensor stack
+    (ZED + RPLidar) and the robot_manager node that starts/stops them on
+    operator request and reports their state, so the workstation GUI can drive
+    the robot's perception stack cleanly over ROS 2.
+  </description>
+  <maintainer email="gerardodelcid16@gmail.com">Gerardo</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
