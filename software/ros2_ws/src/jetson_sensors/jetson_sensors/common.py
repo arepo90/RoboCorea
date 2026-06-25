@@ -21,6 +21,22 @@ def sensor_qos() -> QoSProfile:
     )
 
 
+def enable_mask_qos() -> QoSProfile:
+    """Latched QoS for /sensors/enable_mask.
+
+    transient_local so a node that starts (or is restarted by the GUI's I2C
+    start/stop) after the operator has already set the mask immediately receives
+    the last enable choice, instead of falling back to start_enabled. The
+    publisher (GUI) must match this durability for the two to connect.
+    """
+    return QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=10,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+
+
 class EnableMaskGate:
     """Shared /sensors/enable_mask gate for Jetson-hosted passive sensors."""
 
@@ -46,7 +62,7 @@ class EnableMaskGate:
             UInt8,
             self._topic,
             self._on_mask,
-            QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE),
+            enable_mask_qos(),
         )
 
     def _on_mask(self, msg: UInt8) -> None:

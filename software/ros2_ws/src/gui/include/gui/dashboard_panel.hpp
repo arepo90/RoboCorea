@@ -59,6 +59,8 @@ signals:
     void armPresenceUpdated(int mask);
     // Sensor stack lifecycle (ZED + RPLidar via the Jetson robot_manager).
     void sensorsStatusUpdated(const QString& status);
+    // I2C sensor stack lifecycle (thermal + magnetometer).
+    void i2cStatusUpdated(const QString& status);
 
 public slots:
     // Called by VideoPanel when any widget selects/deselects the thermal source.
@@ -87,6 +89,11 @@ private slots:
     void onSensorsStatusUpdated(const QString& status);
     void onSensorsStartClicked();
     void onSensorsStopClicked();
+    // I2C sensor stack (thermal + magnetometer)
+    void onI2cStatusUpdated(const QString& status);
+    void onI2cStartClicked();
+    void onI2cStopClicked();
+    void onThermalToggled();
 
 private:
     void setConnState(const QString& color, const QString& label);
@@ -167,4 +174,16 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sensors_status_sub_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr sensors_start_cli_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr sensors_stop_cli_;
+
+    // ── I2C sensor stack (MLX90640 thermal + LIS3MDL mag, Jetson robot_manager) ─
+    // Process lifecycle (start/stop the jetson_sensors driver) + per-sensor
+    // runtime enable via /sensors/enable_mask (thermal bit1, mag bit0).
+    QPushButton* thermal_toggle_{nullptr};   // /sensors/enable_mask bit1
+    QLabel*      i2c_indicator_{nullptr};
+    QLabel*      i2c_label_{nullptr};
+    QPushButton* i2c_start_btn_{nullptr};
+    QPushButton* i2c_stop_btn_{nullptr};
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr i2c_status_sub_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr i2c_start_cli_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr i2c_stop_cli_;
 };

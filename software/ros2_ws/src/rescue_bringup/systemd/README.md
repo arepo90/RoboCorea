@@ -20,7 +20,8 @@ target and reports the state — so the GUI gets one-click control with no orpha
 | `zed.service` | ZED wrapper (`publish_tf:=false`). `PartOf` the target. |
 | `lidar.service` | RPLidar driver on the stable `/dev/rplidar`. `PartOf` the target. |
 | `rescue-sensors.target` | Group: start/stop/restart it to control **both** drivers. |
-| `robot-manager.service` | Always-on node exposing `/robot/sensors/{start,stop,restart}` + `/robot/sensors/status`. |
+| `jetson-sensors.service` | I2C sensors (MLX90640 thermal + LIS3MDL mag), one process owning the shared bus. On-demand (no `[Install]`). |
+| `robot-manager.service` | Always-on node managing **stacks**: exposes `/robot/<stack>/{start,stop,restart}` + `/robot/<stack>/status` for `sensors` (ZED+lidar) and `i2c` (thermal+mag). |
 
 Before deploying, check the marked lines in each unit:
 - `Environment=ROS_DOMAIN_ID=20` — must match the workstation/GUI.
@@ -61,12 +62,17 @@ systemctl --user restart rescue-sensors.target
 journalctl --user -u zed.service -f          # logs
 
 # from the workstation, over ROS 2 (robot_manager must be running):
-ros2 service call /robot/sensors/start std_srvs/srv/Trigger "{}"
+ros2 service call /robot/sensors/start std_srvs/srv/Trigger "{}"   # ZED + lidar
 ros2 service call /robot/sensors/stop  std_srvs/srv/Trigger "{}"
 ros2 topic echo /robot/sensors/status
+ros2 service call /robot/i2c/start std_srvs/srv/Trigger "{}"       # thermal + mag driver
+ros2 service call /robot/i2c/stop  std_srvs/srv/Trigger "{}"
+ros2 topic echo /robot/i2c/status
 ```
 
-…or just use the **Sensors ▶ / ⏹** buttons in the GUI dashboard.
+…or just use the **Sensors ▶ / ⏹** and **I2C Sensors ▶ / ⏹** buttons in the GUI
+dashboard (the I2C section also has per-sensor **Thermal**/**Mag** enable toggles,
+which gate `/sensors/enable_mask` — a disabled sensor stops touching the bus).
 
 ## Verify clean teardown
 

@@ -225,8 +225,11 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     connect(heartbeat_timer_, &QTimer::timeout, this, &DashboardPanel::onHeartbeatCheck);
     heartbeat_timer_->start();
 
+    // Latched (transient_local) so the jetson_sensors nodes pick up the last
+    // enable choice when they (re)start — e.g. after an I2C start/stop. Must match
+    // the nodes' enable_mask_qos() durability.
     sensor_mask_pub_ = node_->create_publisher<std_msgs::msg::UInt8>(
-        "/sensors/enable_mask", 10);
+        "/sensors/enable_mask", rclcpp::QoS(10).reliable().transient_local());
     publishSensorMask();  // start with all sensors off
 
     layout->addStretch();
@@ -357,6 +360,57 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         layout->addLayout(sens_btn_row);
     }
 
+    // ── I2C sensors (MLX90640 thermal + LIS3MDL mag; Jetson process + per-sensor) ─
+    add_hsep();
+    {
+        auto* i2c_hdr_row = new QHBoxLayout();
+        auto* i2c_hdr = new QLabel("I2C Sensors", this);
+        i2c_hdr->setStyleSheet(hdr_style);
+        i2c_indicator_ = new QLabel("●", this);
+        i2c_indicator_->setStyleSheet("color: #888; font-size: 14px;");
+        i2c_label_ = new QLabel("—", this);
+        i2c_label_->setStyleSheet("color: #888; font-size: 12px;");
+        i2c_hdr_row->addWidget(i2c_hdr);
+        i2c_hdr_row->addStretch();
+        i2c_hdr_row->addWidget(i2c_indicator_);
+        i2c_hdr_row->addWidget(i2c_label_);
+        layout->addLayout(i2c_hdr_row);
+
+        // Layer 1: start/stop the jetson_sensors driver process on the Jetson.
+        auto* i2c_btn_row = new QHBoxLayout();
+        i2c_btn_row->setSpacing(4);
+        i2c_start_btn_ = new QPushButton("Start I2C", this);
+        i2c_start_btn_->setMinimumHeight(28);
+        i2c_start_btn_->setToolTip("Start the MLX90640 + LIS3MDL driver on the robot "
+                                   "(systemd jetson-sensors.service via robot_manager)");
+        i2c_start_btn_->setStyleSheet(btn_style("#1a5a2a", "#2a7a3a", "#0a3a1a"));
+        connect(i2c_start_btn_, &QPushButton::clicked, this, &DashboardPanel::onI2cStartClicked);
+        i2c_btn_row->addWidget(i2c_start_btn_);
+
+        i2c_stop_btn_ = new QPushButton("Stop", this);
+        i2c_stop_btn_->setMinimumHeight(28);
+        i2c_stop_btn_->setToolTip("Cleanly stop the I2C sensor driver on the robot");
+        i2c_stop_btn_->setStyleSheet(btn_style("#5a2a2a", "#7a3a3a", "#3a1a1a"));
+        connect(i2c_stop_btn_, &QPushButton::clicked, this, &DashboardPanel::onI2cStopClicked);
+        i2c_btn_row->addWidget(i2c_stop_btn_);
+        layout->addLayout(i2c_btn_row);
+
+        // Layer 2: per-sensor runtime enable via /sensors/enable_mask. A disabled
+        // sensor stops touching the bus, so this is the shared-bus-safe control.
+        auto* en_row = new QHBoxLayout();
+        en_row->setSpacing(4);
+        auto* thermal_lbl = new QLabel("Thermal", this);
+        thermal_lbl->setStyleSheet(lbl_style);
+        thermal_toggle_ = make_sensor_toggle();   // OFF by default (mask bit cleared)
+        thermal_toggle_->setToolTip("Enable thermal acquisition (enable_mask bit 1). "
+                                    "Also auto-enabled when the thermal video source is selected.");
+        connect(thermal_toggle_, &QPushButton::toggled, this, &DashboardPanel::onThermalToggled);
+        en_row->addWidget(thermal_lbl);
+        en_row->addWidget(thermal_toggle_);
+        en_row->addStretch();
+        layout->addLayout(en_row);
+    }
+
     auto* btn_row = new QHBoxLayout();
     btn_row->setSpacing(4);
 
@@ -439,6 +493,17 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         });
     sensors_start_cli_ = node_->create_client<std_srvs::srv::Trigger>("/robot/sensors/start");
     sensors_stop_cli_  = node_->create_client<std_srvs::srv::Trigger>("/robot/sensors/stop");
+
+    // ── I2C sensor stack (robot_manager 'i2c' stack on the Jetson) ───────────
+    connect(this, &DashboardPanel::i2cStatusUpdated,
+            this, &DashboardPanel::onI2cStatusUpdated, Qt::QueuedConnection);
+    i2c_status_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/robot/i2c/status", arm_qos,
+        [this](std_msgs::msg::String::SharedPtr msg) {
+            emit i2cStatusUpdated(QString::fromStdString(msg->data));
+        });
+    i2c_start_cli_ = node_->create_client<std_srvs::srv::Trigger>("/robot/i2c/start");
+    i2c_stop_cli_  = node_->create_client<std_srvs::srv::Trigger>("/robot/i2c/stop");
 }
 
 void DashboardPanel::setConnState(const QString& color, const QString& label)
@@ -449,6 +514,12 @@ void DashboardPanel::setConnState(const QString& color, const QString& label)
 
 void DashboardPanel::publishSensorMask()
 {
+    // The enable toggles are the single source of truth: bit0 = mag, bit1 = thermal.
+    // (Both toggles may not exist yet during early construction — treat as off.)
+    uint8_t m = 0;
+    if (mag_toggle_ && mag_toggle_->isChecked())         m |= static_cast<uint8_t>(1 << 0);
+    if (thermal_toggle_ && thermal_toggle_->isChecked()) m |= static_cast<uint8_t>(1 << 1);
+    sensor_mask_ = m;
     std_msgs::msg::UInt8 msg;
     msg.data = sensor_mask_;
     sensor_mask_pub_->publish(msg);
@@ -494,17 +565,23 @@ void DashboardPanel::onHeartbeatCheck()
 
 void DashboardPanel::onSensorToggled()
 {
-    sensor_mask_ &= (1 << 1);  // preserve thermal bit (driven by the video panel)
-    if (mag_toggle_->isChecked()) { sensor_mask_ |= (1 << 0); mag_toggle_->setText("ON"); }
-    else                          { mag_toggle_->setText("OFF"); }
+    mag_toggle_->setText(mag_toggle_->isChecked() ? "ON" : "OFF");
+    publishSensorMask();   // recomputes the full mask from both toggles
+}
+
+void DashboardPanel::onThermalToggled()
+{
+    thermal_toggle_->setText(thermal_toggle_->isChecked() ? "ON" : "OFF");
     publishSensorMask();
 }
 
 void DashboardPanel::setThermalEnabled(bool enabled)
 {
-    if (enabled) sensor_mask_ |=  static_cast<uint8_t>(1 << 1);
-    else         sensor_mask_ &= ~static_cast<uint8_t>(1 << 1);
-    publishSensorMask();
+    // Called by the VideoPanel when the thermal source is selected/deselected;
+    // drive the thermal toggle so enable_mask bit1 has a single source of truth.
+    // setChecked emits toggled() -> onThermalToggled() -> publishSensorMask().
+    if (thermal_toggle_)
+        thermal_toggle_->setChecked(enabled);
 }
 
 void DashboardPanel::onEstopToggled(bool checked)
@@ -689,4 +766,50 @@ void DashboardPanel::onSensorsStatusUpdated(const QString& status)
     const bool active = (s == "active");
     sensors_start_btn_->setEnabled(!active && s != "activating");
     sensors_stop_btn_->setEnabled(s != "inactive");
+}
+
+// ── I2C sensor stack (thermal + magnetometer via robot_manager 'i2c') ────────
+void DashboardPanel::onI2cStartClicked()
+{
+    if (!i2c_start_cli_->service_is_ready()) {
+        RCLCPP_WARN(node_->get_logger(),
+                    "I2C start requested but the service is unavailable "
+                    "(is robot_manager running on the Jetson?)");
+        return;
+    }
+    i2c_start_cli_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    RCLCPP_INFO(node_->get_logger(), "I2C sensors: start requested");
+}
+
+void DashboardPanel::onI2cStopClicked()
+{
+    if (!i2c_stop_cli_->service_is_ready()) {
+        RCLCPP_WARN(node_->get_logger(),
+                    "I2C stop requested but the service is unavailable "
+                    "(is robot_manager running on the Jetson?)");
+        return;
+    }
+    i2c_stop_cli_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    RCLCPP_INFO(node_->get_logger(), "I2C sensors: stop requested");
+}
+
+void DashboardPanel::onI2cStatusUpdated(const QString& status)
+{
+    i2c_label_->setText(status);
+    const QString s = status.section(' ', 0, 0);
+
+    QString color = "#888";
+    if (s == "active")           color = "#33cc33";
+    else if (s == "activating")  color = "#ccaa00";
+    else if (s == "partial")     color = "#ccaa00";
+    else if (s == "failed")      color = "#cc3333";
+    i2c_indicator_->setStyleSheet(QString("color: %1; font-size: 14px;").arg(color));
+    i2c_label_->setStyleSheet(QString("color: %1; font-size: 12px;").arg(color));
+
+    const bool active = (s == "active");
+    i2c_start_btn_->setEnabled(!active && s != "activating");
+    i2c_stop_btn_->setEnabled(s != "inactive");
+    // The per-sensor enable toggles only do anything while the driver is running.
+    thermal_toggle_->setEnabled(active);
+    mag_toggle_->setEnabled(active);
 }
