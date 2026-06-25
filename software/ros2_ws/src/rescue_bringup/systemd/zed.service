@@ -8,13 +8,13 @@ Environment=ROS_DOMAIN_ID=20
 # publish_tf:=false so the ZED never fights the robot_localization EKF for
 # odom->base_footprint. Adjust the workspace path / camera_model if yours differ.
 ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2 publish_tf:=false publish_map_tf:=false'
-# Graceful SIGINT first, then the cgroup is SIGKILLed after the timeout. The ZED
-# SDK can be slow to release the camera, so give it room; the ExecStopPost sweep
-# is a belt-and-suspenders kill of any component container that outlives the unit.
+# Graceful SIGINT first; if the unit ever overruns the timeout the whole cgroup
+# is SIGKILLed. The ZED shuts down cleanly on SIGINT within this window, so no
+# manual ExecStopPost sweep is needed (a `pkill -f` sweep self-matches its own
+# command line and marked the unit 'failed' on every stop).
 KillSignal=SIGINT
 KillMode=control-group
 TimeoutStopSec=20
-ExecStopPost=/bin/bash -lc 'pkill -9 -f "component_container_isolated.*zed" || true'
 Restart=no
 
 [Install]
