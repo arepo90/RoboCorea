@@ -10,8 +10,10 @@
 
 /// Thread-safe filter settings shared between UI thread (writes) and worker thread (reads).
 struct FilterConfig {
-    // QR Code
-    std::atomic<bool> use_zbar{false};
+    // QR Code — default to ZBar: it does full decode and is always linked,
+    // whereas OpenCV's QRCodeDetector only decodes when built with QUIRC (the
+    // apt libopencv-dev is not, so that path logs "QUIRC is not linked").
+    std::atomic<bool> use_zbar{true};
 
     // YOLO Detect
     std::atomic<int> conf_threshold_pct{25}; // 0-100

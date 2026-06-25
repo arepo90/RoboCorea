@@ -118,7 +118,18 @@ bool CameraHub::openSource(cv::VideoCapture& cap, const std::string& source_id)
 {
     if (source_id.rfind("local:", 0) == 0) {
         int index = std::stoi(source_id.substr(6));
-        return cap.open(index, cv::CAP_V4L2);
+        if (!cap.open(index, cv::CAP_V4L2))
+            return false;
+        // Request MJPG (compressed) for USB capture devices. Several analog
+        // grabbers on one shared USB 2.0 bus (a hub) cannot all reserve the
+        // isochronous bandwidth uncompressed YUYV needs, so only one opens at a
+        // time; MJPG shrinks the reservation ~10x so they stream in parallel.
+        // 640x480 is supported by the RF driving-cam digitizers and is plenty
+        // for a low-latency driving feed. Cameras without MJPG just ignore this.
+        cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+        cap.set(cv::CAP_PROP_FRAME_WIDTH, 640);
+        cap.set(cv::CAP_PROP_FRAME_HEIGHT, 480);
+        return true;
     }
     if (source_id.rfind("gst:", 0) == 0) {
         std::string pipeline = source_id.substr(4);

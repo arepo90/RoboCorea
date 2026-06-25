@@ -111,7 +111,12 @@ private:
 
     QComboBox* source_combo_;
     QComboBox* filter_combo_;
+    QComboBox* aspect_combo_{nullptr};
     ClickableLabel* display_;
+
+    // Display aspect mode: 0 = Fit (keep source aspect), 1 = Stretch (fill cell),
+    // 2 = force 4:3, 3 = force 16:9. Read on the UI thread in onFrameReady.
+    std::atomic<int> aspect_mode_{0};
 
     // Dynamic filter-options widget (sliders/toggles), rebuilt per filter.
     QWidget* options_container_{nullptr};

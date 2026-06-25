@@ -125,8 +125,20 @@ VideoWidget::VideoWidget(rclcpp::Node::SharedPtr node,
     filter_combo_->setStyleSheet(
         "QComboBox:disabled { color: #555; background-color: #1e1e2e; "
         "border: 1px solid #2a2a3a; }");
+    // Display aspect ratio for this cell.
+    aspect_combo_ = new QComboBox(this);
+    aspect_combo_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    aspect_combo_->addItem("Fit");      // 0: keep source aspect (letterbox)
+    aspect_combo_->addItem("Stretch");  // 1: fill the cell, ignore aspect
+    aspect_combo_->addItem("4:3");      // 2: force 4:3 (SD analog cams)
+    aspect_combo_->addItem("16:9");     // 3: force 16:9
+    aspect_combo_->setToolTip("Display aspect ratio");
+    connect(aspect_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            [this](int idx) { aspect_mode_.store(idx); });
+
     top_bar->addWidget(source_combo_);
     top_bar->addWidget(filter_combo_);
+    top_bar->addWidget(aspect_combo_);
     layout->addLayout(top_bar);
 
     display_ = new ClickableLabel(this);
@@ -457,13 +469,14 @@ void VideoWidget::setupFilterOptions(const std::string& name)
     opts->setSpacing(0);
 
     if (name == "QR Code") {
-        // Decoder backend: OpenCV (default) | zbar.
+        // Decoder backend: zbar (default) | OpenCV. ZBar decodes; OpenCV needs
+        // QUIRC linked into the build to decode (apt OpenCV lacks it).
         auto* row = new QHBoxLayout();
         auto* btn_cv   = new QPushButton("OpenCV", options_container_);
         auto* btn_zbar = new QPushButton("zbar",   options_container_);
         btn_cv->setCheckable(true);
         btn_zbar->setCheckable(true);
-        btn_cv->setChecked(true);
+        btn_zbar->setChecked(true);
         btn_cv->setStyleSheet(TOGGLE_BTN_STYLE);
         btn_zbar->setStyleSheet(TOGGLE_BTN_STYLE);
 
@@ -567,8 +580,34 @@ void VideoWidget::onFrameReady(const QImage& image)
 {
     if (source_type_.load() == SourceType::NONE || image.isNull())
         return;
-    display_->setPixmap(QPixmap::fromImage(image).scaled(
-        display_->size(), Qt::KeepAspectRatio, Qt::FastTransformation));
+    const QSize cell = display_->size();
+    const QPixmap pm = QPixmap::fromImage(image);
+    switch (aspect_mode_.load()) {
+        case 1:  // Stretch: fill the whole cell, ignore source aspect
+            display_->setPixmap(
+                pm.scaled(cell, Qt::IgnoreAspectRatio, Qt::FastTransformation));
+            break;
+        case 2:  // Force 4:3
+        case 3:  // Force 16:9
+        {
+            const double r = (aspect_mode_.load() == 2) ? (4.0 / 3.0)
+                                                        : (16.0 / 9.0);
+            int bw = cell.width();
+            int bh = static_cast<int>(bw / r);
+            if (bh > cell.height()) {           // box must fit inside the cell
+                bh = cell.height();
+                bw = static_cast<int>(bh * r);
+            }
+            // Stretch the source into the chosen-aspect box; QLabel centers it.
+            display_->setPixmap(
+                pm.scaled(bw, bh, Qt::IgnoreAspectRatio, Qt::FastTransformation));
+            break;
+        }
+        default:  // 0 = Fit: keep source aspect, letterboxed
+            display_->setPixmap(
+                pm.scaled(cell, Qt::KeepAspectRatio, Qt::FastTransformation));
+            break;
+    }
 }
 
 void VideoWidget::onStatusChanged(const QString& text)

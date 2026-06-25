@@ -188,7 +188,7 @@ class SdlsServo(Node):
         self.declare_parameter('max_joint_speed', 1.0)       # rad/s ceiling per joint
 
         # selectively-damped solver
-        self.declare_parameter('sigma_threshold', 0.10)      # σ0: damping onset
+        self.declare_parameter('sigma_threshold', 0.05)      # σ0: damping onset
         self.declare_parameter('lambda_max', 0.04)           # peak per-mode damping
         self.declare_parameter('char_length', 0.25)          # m: angular-row weight
 
