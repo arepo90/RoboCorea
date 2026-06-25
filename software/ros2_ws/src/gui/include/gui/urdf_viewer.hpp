@@ -15,8 +15,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <sensor_msgs/msg/imu.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
@@ -38,9 +38,11 @@ public:
     void setMapMode(bool on);
 
     // Orientation follow: rotate the model's base by the robot's live attitude
-    // (roll/pitch/yaw from the ZED IMU) so the twin shows the real behaviour.
-    // Camera control is unaffected. If no orientation arrives the model returns
-    // to its default (upright) pose. Off by default.
+    // (the orientation quaternion of an odometry topic) so the twin shows the
+    // real behaviour. Camera control is unaffected. If no odometry arrives the
+    // model returns to its default (upright) pose. Off by default.
+    // Note: /odometry/filtered and /odom/wheel are planar (yaw only); point
+    // twin_odom_topic at /zed/zed_node/odom for full roll/pitch/yaw.
     void setFollowOrientation(bool on);
 
 protected:
@@ -143,10 +145,10 @@ private:
     bool have_base_{false};
     float map_floor_z_{-0.15f}; // floor quad z in the map frame (under the model)
 
-    // ── Orientation follow (twin attitude from the ZED IMU) ──────────────────
-    void onOrientation(const sensor_msgs::msg::Imu::SharedPtr msg);  // ROS thread
+    // ── Orientation follow (twin attitude from an odometry topic) ────────────
+    void onOdom(const nav_msgs::msg::Odometry::SharedPtr msg);  // ROS thread
     bool follow_orient_{false};
-    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr orient_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr orient_sub_;
     std::mutex orient_mutex_;
     double orient_q_[4]{0.0, 0.0, 0.0, 1.0};  // x, y, z, w
     double orient_time_s_{-1e9};               // receipt time (ROS clock seconds)

@@ -440,28 +440,30 @@ void UrdfViewer::setFollowOrientation(bool on)
 {
     follow_orient_ = on;
     if (on && !orient_sub_) {
-        // Topic is overridable so the zed/zed2 namespace can be corrected without
-        // a rebuild:  ros2 run gui gui --ros-args -p twin_imu_topic:=/zed/zed_node/imu/data
-        std::string topic = "/zed2/zed_node/imu/data";
-        if (!node_->has_parameter("twin_imu_topic"))
-            node_->declare_parameter("twin_imu_topic", topic);
-        topic = node_->get_parameter("twin_imu_topic").as_string();
-        orient_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
+        // Topic is overridable without a rebuild. /odometry/filtered + /odom/wheel
+        // are planar (yaw only); use /zed/zed_node/odom for full roll/pitch/yaw:
+        //   ros2 run gui gui --ros-args -p twin_odom_topic:=/zed/zed_node/odom
+        std::string topic = "/odometry/filtered";
+        if (!node_->has_parameter("twin_odom_topic"))
+            node_->declare_parameter("twin_odom_topic", topic);
+        topic = node_->get_parameter("twin_odom_topic").as_string();
+        // best_effort subscriber connects to both reliable and best_effort pubs.
+        orient_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
             topic, rclcpp::SensorDataQoS(),
-            [this](sensor_msgs::msg::Imu::SharedPtr m) { onOrientation(m); });
+            [this](nav_msgs::msg::Odometry::SharedPtr m) { onOdom(m); });
         RCLCPP_INFO(node_->get_logger(),
-                    "twin: following robot attitude from IMU '%s' "
-                    "(override with -p twin_imu_topic:=...)", topic.c_str());
+                    "twin: following robot attitude from odom '%s' "
+                    "(override with -p twin_odom_topic:=...)", topic.c_str());
     }
 }
 
-void UrdfViewer::onOrientation(const sensor_msgs::msg::Imu::SharedPtr msg)
+void UrdfViewer::onOdom(const nav_msgs::msg::Odometry::SharedPtr msg)
 {
     std::lock_guard<std::mutex> lk(orient_mutex_);
-    orient_q_[0] = msg->orientation.x;
-    orient_q_[1] = msg->orientation.y;
-    orient_q_[2] = msg->orientation.z;
-    orient_q_[3] = msg->orientation.w;
+    orient_q_[0] = msg->pose.pose.orientation.x;
+    orient_q_[1] = msg->pose.pose.orientation.y;
+    orient_q_[2] = msg->pose.pose.orientation.z;
+    orient_q_[3] = msg->pose.pose.orientation.w;
     orient_time_s_ = node_->now().seconds();
 }
 
