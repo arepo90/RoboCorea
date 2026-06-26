@@ -177,3 +177,13 @@ class ChassisEstopMirror:
             return None
         self.active = active
         return build_frame(MSG_ESTOP if active else MSG_ESTOP_CLEAR, b'')
+
+    def reset(self) -> bytes | None:
+        """The chassis link is gone, so its mirrored e-stop is no longer
+        authoritative. Drop to inactive and, if we were holding the arm
+        e-stopped, return an MSG_ESTOP_CLEAR frame for the caller to forward to
+        the arm (the caller still gates it on any software e-stop)."""
+        if not self.active:
+            return None
+        self.active = False
+        return build_frame(MSG_ESTOP_CLEAR, b'')

@@ -74,6 +74,9 @@ ARM_MODE_NAMES = {0: 'DEXTERITY', 1: 'CHASSIS'}
 MODE_NAMES = {0: 'INIT', 1: 'STANDBY', 2: 'NORMAL', 3: 'ARM', 4: 'ESTOP', 5: 'FLIPPER'}
 
 PPM_CHANNELS = 6
+# 0-based PPM indices of the traction drive sticks (firmware Ch3 fwd / Ch4 turn).
+PPM_CH_TRACTION_FWD = 2
+PPM_CH_TRACTION_TURN = 3
 
 
 def _normalise_candidates(value) -> list[str]:
@@ -264,11 +267,24 @@ class ESP32BridgeNode(Node):
         self._odom_child_frame = str(self.get_parameter('odom_child_frame').value)
         self._odom_rate_hz = float(self.get_parameter('odom_rate_hz').value)
 
-        self._cmd_vel_enabled = bool(self.get_parameter('enable_cmd_vel_drive').value)
+        # Autonomy (/cmd_vel → tracks) is a RUNTIME gate. The launch param is only the
+        # INITIAL state: the GUI toggles it live on /autonomy/enable, and an operator
+        # RC override latches it back off (see _handle_telemetry / _set_autonomy). The
+        # firmware adds its own stick-neutral + freshness arbitration as the lowest
+        # safety layer, so this gate is purely an extra software allow/prevent.
+        self._autonomy_enabled = bool(self.get_parameter('enable_cmd_vel_drive').value)
         self._max_track_speed = float(self.get_parameter('max_track_speed_mps').value)
         self._cmd_vel_timeout = float(self.get_parameter('cmd_vel_timeout').value)
         self._cmd_vel_last_t = None
         self._cmd_vel_released = True
+
+        # RC stick state for the autonomy→teleop handoff. Defaults mirror the firmware
+        # (neutral 1500 µs, ±500 span, deadband 0.05) until /robot/ppm_calib arrives;
+        # PpmCalibPayload is (min, neutral, max) per channel + deadband×1000 (index 18).
+        self._ppm_min = [1000] * PPM_CHANNELS
+        self._ppm_neutral = [1500] * PPM_CHANNELS
+        self._ppm_max = [2000] * PPM_CHANNELS
+        self._ppm_deadband = 0.05
 
         self._track_dist = {'L': None, 'R': None}
         self._track_zero = {'L': None, 'R': None}
@@ -295,6 +311,9 @@ class ESP32BridgeNode(Node):
         self._pub_tracks = self.create_publisher(Vector3, '/encoders/tracks', sensor_qos)
         self._pub_flipper = self.create_publisher(Float32MultiArray, '/encoders/flipper', sensor_qos)
         self._pub_wheel_odom = self.create_publisher(Odometry, '/odom/wheel', sensor_qos)
+        # Actual autonomy-drive state (latched so a late-joining GUI reflects it). The
+        # bridge owns this: it goes false on a GUI disable AND on an RC override.
+        self._pub_autonomy_state = self.create_publisher(Bool, '/autonomy/state', latched_qos)
         self._pub_vesc = self.create_publisher(Float32MultiArray, '/motors/vesc_status', sensor_qos)
         self._pub_odrive = self.create_publisher(Float32MultiArray, '/motors/odrive_status', sensor_qos)
         self._pub_lktech = self.create_publisher(Float32MultiArray, '/motors/lktech_status', sensor_qos)
@@ -319,12 +338,20 @@ class ESP32BridgeNode(Node):
         self.create_subscription(JointState, '/joint_states', self._on_joint_states, 10)
         self.create_subscription(UInt16MultiArray, '/robot/ppm_calib', self._on_ppm_calib, latched_qos)
         self.create_subscription(Float32, '/gripper', self._on_gripper, 10)
-        if self._cmd_vel_enabled:
-            self.create_subscription(Twist, '/cmd_vel', self._on_cmd_vel, 10)
-            # Watchdog: release the tracks back to RC if /cmd_vel goes stale.
-            self.create_timer(0.1, self._cmd_vel_watchdog)
+        # Autonomy drive path: always wired. Forwarding is gated by the runtime
+        # _autonomy_enabled flag (GUI toggle + RC-override latch), not by subscription
+        # presence, so it can be enabled/disabled live. /autonomy/enable is VOLATILE on
+        # purpose: a restarted bridge must come up at its param default (off by default)
+        # and wait for a fresh operator request rather than auto-resuming.
+        self.create_subscription(Twist, '/cmd_vel', self._on_cmd_vel, 10)
+        self.create_subscription(Bool, '/autonomy/enable', self._on_autonomy_enable, 10)
+        # Watchdog: release the tracks back to RC if /cmd_vel goes stale.
+        self.create_timer(0.1, self._cmd_vel_watchdog)
+        self._publish_autonomy_state()
+        if self._autonomy_enabled:
             self.get_logger().warn(
-                'enable_cmd_vel_drive=true: /cmd_vel will command the traction VESCs '
+                'Autonomy drive ENABLED at startup (enable_cmd_vel_drive=true): /cmd_vel '
+                f'will command the traction VESCs when RC drive sticks are neutral '
                 f'(max {self._max_track_speed:.2f} m/s = full scale)')
 
         self._chassis_handlers = {
@@ -414,6 +441,10 @@ class ESP32BridgeNode(Node):
         for link in reaped:
             link.stop()
             self.get_logger().info(f'ESP serial candidate {link.path} disappeared; dropped')
+            # If the chassis (the arm's mirrored e-stop source) went away, release
+            # the arm so it can still be armed with only the arm PCB connected.
+            if link.role == ROLE_CHASSIS:
+                self._on_chassis_lost()
         for link, path in started:
             link.start()
             self.get_logger().info(f'Watching ESP serial candidate {path}')
@@ -513,6 +544,25 @@ class ESP32BridgeNode(Node):
         else:
             self.get_logger().info('Mirrored chassis e-stop clear to arm ESP')
 
+    def _on_chassis_lost(self):
+        # The arm PCB has no e-stop wire of its own; its only hardware e-stop
+        # source is the chassis, mirrored to it here (§16). Once the chassis link
+        # is gone that mirror is stale, so drop it and release the arm — UNLESS a
+        # software e-stop is separately latched. This is what lets the arm be
+        # armed with ONLY the arm PCB connected; while the chassis IS present its
+        # e-stop still holds the arm as before. (Caller must not hold _links_lock:
+        # _send_to_role takes it.)
+        frame = self._estop_mirror.reset()
+        if frame is None:
+            return  # the mirror wasn't holding the arm e-stopped
+        if self._software_estop_active:
+            self.get_logger().info(
+                'Chassis link lost; cleared its e-stop mirror, but arm stays '
+                'e-stopped by software')
+            return
+        self._send_to_role(ROLE_ARM, frame, 'chassis-lost arm release', log_missing=False)
+        self.get_logger().warn('Chassis link lost; released arm from mirrored e-stop')
+
     # ESP32 -> PC handlers.
     def _handle_telemetry(self, payload: bytes):
         fmt = '<BB' + 'H' * PPM_CHANNELS + 'hhhI'
@@ -524,6 +574,18 @@ class ESP32BridgeNode(Node):
         spd_l_x10, spd_r_x10, flip_x10, uptime_ms = fields[2 + PPM_CHANNELS:]
 
         self._mirror_chassis_estop(bool(flags & 0x08), 'telemetry')
+
+        # Autonomy → teleop handoff. While autonomy is engaged, an operator drive-stick
+        # deflection (Ch3/Ch4) or virtual-flip (flags bit4) latches autonomy OFF; it must
+        # then be re-enabled from the GUI (explicit re-arm). The firmware overrides the
+        # same inputs transiently every loop; this makes the handoff sticky at the bridge.
+        if self._autonomy_enabled:
+            n_fwd = self._normalise_ppm(PPM_CH_TRACTION_FWD, ppm)
+            n_turn = self._normalise_ppm(PPM_CH_TRACTION_TURN, ppm)
+            vflip = bool(flags & 0x10)
+            if abs(n_fwd) > self._ppm_deadband or abs(n_turn) > self._ppm_deadband or vflip:
+                why = 'virtual-flip engaged' if vflip else 'operator moved a drive stick'
+                self._set_autonomy(False, reason=f'RC override ({why})')
 
         m = String()
         m.data = MODE_NAMES.get(mode_val, f'UNKNOWN_{mode_val}')
@@ -822,7 +884,51 @@ class ESP32BridgeNode(Node):
         self._send_to_role(ROLE_ARM, build_frame(MSG_GRIPPER, struct.pack('<h', int(val * 1000.0))),
                            'gripper command')
 
+    def _normalise_ppm(self, ch: int, ppm) -> float:
+        # Mirror the firmware RC::normalise: asymmetric min/neutral/max → [-1, 1].
+        raw = ppm[ch]
+        neu = self._ppm_neutral[ch]
+        if raw >= neu:
+            half = self._ppm_max[ch] - neu
+            v = (raw - neu) / half if half > 0 else 0.0
+        else:
+            half = neu - self._ppm_min[ch]
+            v = -(neu - raw) / half if half > 0 else 0.0
+        return max(-1.0, min(1.0, v))
+
+    def _publish_autonomy_state(self):
+        m = Bool()
+        m.data = self._autonomy_enabled
+        self._pub_autonomy_state.publish(m)
+
+    def _set_autonomy(self, enabled: bool, reason: str = ''):
+        if enabled == self._autonomy_enabled:
+            return
+        self._autonomy_enabled = enabled
+        tag = f': {reason}' if reason else ''
+        if not enabled:
+            # Hand the tracks straight back to RC (the firmware also times out, but make
+            # the release explicit and immediate).
+            self._send_to_role(ROLE_CHASSIS, build_traction_cmd(0.0, 0.0, False),
+                               'autonomy disable release', log_missing=False)
+            self._cmd_vel_released = True
+            self.get_logger().warn(f'Autonomy drive DISABLED{tag}')
+        else:
+            self._cmd_vel_last_t = None
+            self._cmd_vel_released = True
+            self.get_logger().warn(
+                f'Autonomy drive ENABLED{tag} (/cmd_vel may move the tracks while RC '
+                'drive sticks are neutral)')
+        self._publish_autonomy_state()
+
+    def _on_autonomy_enable(self, msg: Bool):
+        self._set_autonomy(bool(msg.data), reason='operator (GUI)')
+
     def _on_cmd_vel(self, msg: Twist):
+        # Runtime gate: ignore /cmd_vel unless autonomy is engaged (GUI toggle, not
+        # latched off by an RC override). The firmware re-checks RC-stick-neutral too.
+        if not self._autonomy_enabled:
+            return
         # Differential mixing (geometry lives here; the ESP32 reuses the RC path's
         # eRPM scaling + direction signs). Normalise to [-1,1] against the full-scale
         # track speed. The ESP32 only acts on this while the RC sticks are neutral.
@@ -855,6 +961,13 @@ class ESP32BridgeNode(Node):
             return
         payload = struct.pack('<' + 'HHH' * 6 + 'H', *[int(v) for v in msg.data[:19]])
         self._send_to_role(ROLE_CHASSIS, build_frame(MSG_PPM_CALIB, payload), 'PPM calibration')
+        # Cache the same calibration the firmware uses so the autonomy→teleop override
+        # check (_handle_telemetry) reads the operator's real neutral/span/deadband.
+        d = [int(v) for v in msg.data[:19]]
+        self._ppm_min = [d[3 * c] for c in range(PPM_CHANNELS)]
+        self._ppm_neutral = [d[3 * c + 1] for c in range(PPM_CHANNELS)]
+        self._ppm_max = [d[3 * c + 2] for c in range(PPM_CHANNELS)]
+        self._ppm_deadband = d[18] / 1000.0
         db = Float32()
         db.data = msg.data[18] / 1000.0
         self._pub_deadband.publish(db)

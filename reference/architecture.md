@@ -236,12 +236,17 @@ RoboCorea/
 │                             #   flipper_position.lisp — flipper position loop (§7.3)
 │
 ├── software/
-│   └── ros2_ws/              # ONE ROS 2 Humble workspace, shared by Jetson
-│       └── src/
-│           ├── esp32_bridge/ # Serial ⇄ ROS 2 bridge — IMPLEMENTED
-│           └── gui/          # Qt6 operator console — video/dashboard/odometry/
-│                             #   speech/twin/CV-filters/config-dialogs IMPLEMENTED
-│                             #   (other packages below are planned)
+│   ├── ros2_ws/              # ONE ROS 2 Humble workspace, shared by Jetson
+│   │   └── src/
+│   │       ├── esp32_bridge/ # Serial ⇄ ROS 2 bridge — IMPLEMENTED
+│   │       ├── dicerox_mapping/ # 2D SLAM (slam_toolbox) — IMPLEMENTED (§10)
+│   │       ├── rescue_nav/   # Nav2 + EKF + sim + /cmd_vel path — IMPLEMENTED (§10)
+│   │       └── gui/          # Qt6 operator console — video/dashboard/odometry/
+│   │                         #   speech/twin/CV-filters/config-dialogs IMPLEMENTED
+│   │                         #   (other packages below are planned)
+│   └── sim_ws/               # SEPARATE Gazebo (gz-sim/Ignition) sim workspace
+│                             #   (tracked_robot_*) — standalone prototype, NOT wired
+│                             #   into ros2_ws; rescue_nav has its own Gazebo-Classic sim
 │
 └── reference/
     ├── architecture.md       # ← THIS FILE. The source of truth.
@@ -261,7 +266,8 @@ below are planned:
 | `rescue_interfaces` | msg/srv | both | Shared custom message & service definitions. **(arm saved-pose services implemented: SavePose/GoToPose/DeletePose/ListPoses)** |
 | `esp32_bridge` | Python | Jetson | Serial binary protocol ⇄ ROS 2 topics. The relay core. **(implemented)** |
 | `jetson_sensors` | Python | Jetson | MLX90640 I2C → `/sensors/thermal` (`Image`) and LIS3MDL I2C → `/sensors/mag` (`MagneticField`). |
-| `rescue_nav` *(future)* | mixed | Jetson | ZED2 odometry + RPLidar + `slam_toolbox`. Deferred. |
+| `dicerox_mapping` | mixed | Jetson | 2D SLAM: `slam_toolbox` + ZED2 planar odom (`zed_planar_odom`) + RPLidar scan reframer (`scan_frame_republisher`). Map save + localization. **(implemented)** |
+| `rescue_nav` | Python | Jetson/WS | **Navigation layer on top of `dicerox_mapping`**: Nav2 (planner + RegulatedPurePursuit + costmaps + waypoint follower), `robot_localization` **EKF** with adaptive covariance, a Gazebo *Classic* sim, the `waypoint_runner`, and the `/cmd_vel`→traction path. Real-robot workflows in `docs/COMPETITION_WORKFLOWS.md`. **(implemented — 2D autonomy PoC)** |
 | `gui` | C++/Qt6 | Workstation | Operator GUI (video, thermal, dashboard, digital twin, dialogs). Hosts the workstation **`bringup.launch.py`** (GUI + servo + flipper_state + twin) and the **arm arm/disarm + dexterity/chassis controls** in the dashboard. **Video/dashboard/odometry/speech/twin/CV-filters + config dialogs (settings + PPM-calib) implemented.** |
 | `rescue_vision` | Python | Workstation | YOLO hazmat detection on the C920 streams. |
 | `arm_description` | URDF/STL | Workstation | **Combined** robot URDF (arm + chassis + 4 flippers) + chassis/flipper meshes, for the digital twin and the arm's body-collision. **(implemented: `dicerox_full.urdf`; MoveIt-specific config still deferred)** |
@@ -515,9 +521,18 @@ the **same** VESC eRPM scaling + direction signs the RC path uses
 (`Locomotion::setTrackSpeeds`). The ESP32 only acts on it while the **RC drive
 sticks are neutral**, virtual-flip is off, and the command is **fresh**
 (`EXT_DRIVE_TIMEOUT_MS`) — touching a stick, engaging virtual-flip, losing the RC
-link, or a stale command all instantly reclaim manual control. The bridge gates
-the path behind `enable_cmd_vel_drive` (default **false**) and stops sending on a
-`/cmd_vel` timeout.
+link, or a stale command all instantly reclaim manual control (that firmware
+arbitration is *transient* — it re-checks every loop).
+
+On top of that firmware layer the **bridge** owns a *runtime* autonomy gate (an
+extra software allow/prevent): it only forwards `/cmd_vel` while autonomy is
+**enabled**, and stops sending on a `/cmd_vel` timeout. The gate's initial value is
+the `enable_cmd_vel_drive` param (default **false**); the **GUI** toggles it live via
+`/autonomy/enable`, and the bridge publishes the authoritative state on
+`/autonomy/state` (latched). Crucially, the bridge makes the handoff **sticky**: when
+autonomy is engaged and it sees the operator deflect a **drive stick (Ch3/Ch4)** or
+engage **virtual-flip** (from telemetry), it **latches autonomy off** and releases the
+tracks — autonomy must then be re-enabled explicitly from the GUI. See §16.
 
 ---
 
@@ -546,12 +561,21 @@ hardware and the operator network. Planned nodes:
   the workstation GUI. The Orin Nano has **no NVENC**, so nothing is *encoded* on
   the Jetson — the C920 encodes H.264 itself and the Jetson just packetizes
   (near-zero CPU). See §11.1 and the gui README.
-- **`rescue_nav`** *(future, deferred)*. ZED2 driver (VIO odometry **and IMU** in
-  `zed_camera_link`), RPLidar A2M12 (`sllidar_ros2`), a static
-  `zed_camera_link → laser` transform, and `slam_toolbox` publishing
-  `map → odom`. It will also host the **`robot_localization` EKF** that fuses the
-  bridge's `/odom/wheel` with the ZED2 IMU + VIO into a filtered `odom → base_link`
-  (see §18). Hardware is present now; the stack is not yet implemented.
+- **`dicerox_mapping`** *(implemented)*. 2D SLAM front-end + mapper. Projects the
+  ZED2 VIO into a planar `/filtered_odom` (`zed_planar_odom`), reframes the RPLidar
+  `/scan` into `base_laser` (`scan_frame_republisher`), and runs `slam_toolbox`
+  (mapping or localization mode) publishing `map → odom` + `/map`. The ZED2 and
+  RPLidar **drivers themselves** (`zed_wrapper`, the Slamtec A1 driver) are *external*
+  sensor bring-up — run them separately, the ZED wrapper with `publish_tf:=false`.
+- **`rescue_nav`** *(implemented — 2D autonomy PoC)*. The navigation layer **on top
+  of `dicerox_mapping`**: Nav2 (planner + RegulatedPurePursuit controller + costmaps
+  + waypoint follower), the **`robot_localization` EKF** with an `adaptive_odom_
+  covariance` node that fuses the bridge's `/odom/wheel` + ZED VIO + ZED IMU into a
+  filtered `odom → base_footprint` (dynamic, condition-aware weighting), a Gazebo
+  *Classic* simulation (no hardware), a `waypoint_runner`, and the `/cmd_vel`→traction
+  drive path (§9.2). The two competition entry points are `real_mapping.launch.py`
+  (unknown arena) and `real_navigation.launch.py` (known map, AMCL by default) —
+  see `rescue_nav/docs/COMPETITION_WORKFLOWS.md`. Still 2D only (no elevation map).
 
 The Jetson does **not** handle the RF cameras (they go straight to the
 workstation) and does **not** run the GUI or arm IK.
@@ -615,7 +639,7 @@ both are visible at once under the twin.)
 | `VideoPanel` / `VideoWidget` | 2×2 grid of feeds; click-to-enlarge; each widget runs its own filter pipeline on a worker thread and can select any source (incl. thermal). An enlarged cell supports **zoom + pan** (on-screen +/−/Fit buttons or Ctrl+scroll to zoom — trackpad pinch only on Wayland, not X11; two-finger scroll / drag to pan), applied as an ROI crop+upscale of the source frame **before** the filter pipeline (so the CV runs on the zoomed region); resets to fit on collapse. |
 | `FilterRegistry` / `filters` | Self-registering CV filters with a thread-safe `FilterConfig` (atomics). Per-widget instances. |
 | `OdometryPanel` | Track speeds, **track wheel-odometry (x/y/yaw/vx from `/odom/wheel`)**, 4 flipper angles, **per-VESC rows (the six VESC IDs)**, and arm telemetry (ODrive/LKTech/ZE300). |
-| `DashboardPanel` | Connection LED + heartbeat, magnetometer readout (+ enable toggle), **orientation readout from the ZED2 IMU**, **e-stop button**, **arm arm/disarm + dexterity/chassis controls**, audio toggle, settings button. |
+| `DashboardPanel` | Connection LED + heartbeat, magnetometer readout (+ enable toggle), **orientation readout from the ZED2 IMU**, **e-stop button**, an **AUTO DRIVE toggle** (autonomy `/cmd_vel` allow/prevent, reflecting `/autonomy/state`; §16), **arm arm/disarm + dexterity/chassis controls**, audio toggle, settings button. |
 | `DigitalTwinPanel` / `UrdfViewer` | OpenGL 3-D view of the **combined** arm + chassis + flipper URDF, posed from `/joint_states` (arm joints from `servo_node`, flipper joints from `flipper_state`). |
 | `ArmPosePanel` | Saved-pose controls under the twin: a thin client of the `servo_node` save/go/delete/list services with inline per-pose twin thumbnails. Mirrors the pose-name list + selection to `~/.config/robocorea_gui/saved_poses.json` and renders to `pose_thumbs/` so the dropdown is populated at launch before the servo connects (server stays authoritative, §12). |
 | `GstAvStream` | Native-GStreamer receiver for the front C920's **A/V SRT** stream: `srtsrc ! tsdemux` → video appsink (shown via `CameraHub`) + `opusdec ! tee` → speakers **and** an appsink feeding `SpeechProcessor`. Auto-reconnects. |
@@ -693,6 +717,7 @@ links.
 | `/encoders/tracks` | `Vector3` | x=left_rpm, y=right_rpm (live track speed) |
 | `/encoders/flipper` | `Float32MultiArray` | `[fl, fr, rl, rr]` degrees |
 | `/odom/wheel` | `nav_msgs/Odometry` | track wheel odometry from the traction VESC tachometers (no TF) |
+| `/autonomy/state` | `Bool` (latched) | actual autonomy-drive state; goes false on a GUI disable **or** an RC override (§9.2/§16) |
 | `/motors/vesc_status` | `Float32MultiArray` | per-VESC telemetry (incl. tachometer) |
 | `/motors/odrive_status` | `Float32MultiArray` | per-arm-joint telemetry |
 
@@ -715,15 +740,20 @@ links.
 |-------|------|---------|
 | `/robot/estop` | `Bool` | true = e-stop, false = clear |
 | `/joint_states` | `sensor_msgs/JointState` | arm joint positions (rad), forwarded to the arm ESP32 |
-| `/robot/ppm_calib` | `UInt16MultiArray` | 6ch × (min, neutral, max) |
+| `/robot/ppm_calib` | `UInt16MultiArray` | 6ch × (min, neutral, max) + deadband; also cached for the autonomy override check |
 | `/gripper` | `Float32` | gripper open/close **rate** (+open / −close), routed to the arm PCB as `MSG_GRIPPER` (§13.4) |
+| `/cmd_vel` | `geometry_msgs/Twist` | autonomy drive (Nav2); forwarded as `MSG_TRACTION_CMD` only while autonomy is enabled (§9.2) |
+| `/autonomy/enable` | `Bool` | operator request to allow/prevent `/cmd_vel` driving the tracks (from the GUI; volatile) |
 
 ### Published by `gui`
 
 `/robot/ppm_calib` (reliable + transient-local), `/robot/estop` (republished
-~10 Hz), `/sensors/enable_mask`. (No `/robot/keybind` — the RC control scheme is
-fixed, see §13.2. No `/audio` topic — the C920 audio rides SRT and is decoded in
-the GUI.)
+~10 Hz), `/sensors/enable_mask`, and **`/autonomy/enable`** (`Bool`, the autonomy
+allow/prevent toggle in the dashboard). The dashboard also **subscribes** to
+**`/autonomy/state`** (latched) to drive the toggle's checked state, so an RC
+override that the bridge latches off is reflected in the button. (No `/robot/keybind`
+— the RC control scheme is fixed, see §13.2. No `/audio` topic — the C920 audio
+rides SRT and is decoded in the GUI.)
 
 ### Arm stack
 
@@ -863,11 +893,24 @@ angle** (they are never driven home).
   legacy) for local jogging, or `base_link` for world-frame jogging.
 - No IMU frame on the ESP32 side. The robot's IMU is the **ZED2's**, on
   `zed_camera_link` (mounting transform to `base_link` set in the URDF).
-- *(Future nav)* `map → odom → base_link`. `odom → base_link` is owned by the
-  **`robot_localization` EKF** that fuses the bridge's `/odom/wheel` (track
-  tachometers) with the ZED2 IMU + VIO; a static `zed_camera_link → laser`
-  (RPLidar) transform feeds `slam_toolbox` for `map → odom`. The wheel-odometry
-  publisher deliberately does **not** emit a TF (the EKF does).
+- *(Nav, implemented)* The nav stack's **standardized TF contract** (set up by
+  `rescue_nav/launch/sensor_frontend.launch.py`) is:
+  `map → odom → base_footprint → base_link → base_laser`.
+  - `map → odom` — `slam_toolbox` (mapping) or AMCL/`slam_toolbox` (localization).
+  - `odom → base_footprint` — the **`robot_localization` EKF** (fuses `/odom/wheel`
+    + ZED VIO + ZED IMU). The wheel-odom publisher deliberately emits **no** TF
+    (the EKF owns it); the ZED wrapper must run with `publish_tf:=false`.
+  - `base_footprint → base_link` — a **static identity** transform (the planar
+    rescue base treats them coincident; refine `z` on hardware). This is what lets
+    the robot/arm URDF (rooted at `base_link`) attach under the nav frames.
+  - `base_link → base_laser` — static RPLidar extrinsics (A1 mounted reversed →
+    `yaw = π` by default).
+  > **Note:** `dicerox_mapping`'s *standalone* launches use the shorter
+  > `odom → base_footprint → base_laser` (no `base_link`); the `sensor_frontend`
+  > path above is the fuller, canonical tree used for the real-robot workflows.
+  > The bridge's `/odom/wheel` is stamped `child_frame=base_link` (coincident with
+  > `base_footprint`); the EKF's `adaptive_odom_covariance` restamps it to
+  > `base_footprint` before fusion.
 
 The digital twin in the GUI consumes the **combined** robot URDF
 (`arm_description/dicerox_full.urdf` — arm + chassis + flippers) on
@@ -902,11 +945,31 @@ joints from `servo_node`, the flipper joints from `arm_teleop/flipper_state`
   chassis (unless a software e-stop is also latched). **Safety tradeoff for this
   revision:** the arm PCB does not have a direct RC/e-stop wire. The Jetson bridge
   mirrors chassis e-stop transitions to the arm ESP32 over the second USB serial
-  link (`MSG_ESTOP` / `MSG_ESTOP_CLEAR`).
+  link (`MSG_ESTOP` / `MSG_ESTOP_CLEAR`). The mirror is **only authoritative while
+  the chassis link is present**: if the chassis serial link drops, the bridge
+  clears the mirror and releases the arm (sends `MSG_ESTOP_CLEAR`, unless a
+  software e-stop is independently latched), so the arm can be **armed with only
+  the arm PCB connected** (bench/standalone-arm work). While the chassis *is*
+  connected its e-stop still holds the arm as before, and the GUI **software
+  e-stop** stops the arm regardless of the chassis.
 - **Software e-stop:** the GUI publishes `/robot/estop` (republished ~10 Hz);
   the bridge broadcasts `MSG_ESTOP` / `MSG_ESTOP_CLEAR` to all discovered ESP32
   links. ESTOP neutralizes the **base** outputs (tracks stop, flippers hold) and
   **holds** the arm; recovery requires an explicit clear.
+- **Autonomy drive gate + handoff (three layers).** Nav2's `/cmd_vel` can only move
+  the tracks through `MSG_TRACTION_CMD`, and it is guarded at three levels:
+  1. **Firmware arbitration (transient, always on):** the chassis ESP32 obeys the
+     external command *only* while the RC drive sticks are neutral, virtual-flip is
+     off, and the command is fresh — re-checked every control loop (§9.2).
+  2. **Bridge runtime gate (software allow/prevent):** the bridge forwards `/cmd_vel`
+     only while autonomy is **enabled**. The operator owns this from the GUI dashboard
+     **"AUTO DRIVE"** toggle (`/autonomy/enable`); the bridge reports the real state on
+     `/autonomy/state` (latched). Default is **off** (`enable_cmd_vel_drive`).
+  3. **Latched handoff to teleop:** when autonomy is engaged and the bridge sees the
+     operator deflect a **drive stick** or engage **virtual-flip** (from telemetry), it
+     **latches autonomy off** and releases the tracks. Re-engaging autonomy is a
+     deliberate GUI action — a stick nudge does not silently resume it. (E-stop is
+     separate: Ch6-down or the software e-stop still stops everything regardless.)
 - **Arm e-stop = HOLD, not limp (`ARM_ESTOP_HOLD = 1`, default):** an e-stop on
   an *armed* arm freezes every joint at its last commanded pose with the motors
   **still energized**, so the (heavy, gravity-loaded) arm stays put instead of
@@ -979,7 +1042,13 @@ ros2 launch esp32_bridge esp32_bridge.launch.py
 # ros2 launch esp32_bridge esp32_bridge.launch.py serial_port:=/dev/serial/by-id/usb-...
 ros2 launch jetson_sensors jetson_sensors.launch.py
 ./software/ros2_ws/src/gui/scripts/c920_srt_stream.sh   # C920 H.264 (+Opus) → SRT; edit devices/ports at top
-# (future) ros2 launch rescue_nav slam.launch.py
+# Autonomy (2D PoC): build a map, then navigate a known map. ZED + RPLidar drivers
+# are external sensor bring-up (run the ZED wrapper with publish_tf:=false).
+#   ros2 launch rescue_nav real_mapping.launch.py            # unknown arena → build map
+#   ros2 launch rescue_nav save_competition_map.launch.py map_name:=$HOME/maps/track
+#   ros2 launch rescue_nav real_navigation.launch.py         # known map (AMCL default)
+# See rescue_nav/docs/COMPETITION_WORKFLOWS.md. Enable the drive path on the bridge
+# with enable_cmd_vel_drive:=true (or the GUI "AUTO DRIVE" toggle, §16).
 ```
 
 **On the workstation** launch the operator stack in one shot (GUI + SDLS servo +
@@ -1030,7 +1099,7 @@ Things that are **not yet pinned down** and must be resolved on real hardware:
 7. **Flipper angle limits.** Default is free 360° spin (wrapped). To range-limit,
    set `FLIPPER_SOFT_LIMIT_ENABLE` + `FLIPPER_ANGLE_MIN/MAX` (switches the ESP
    target from wrapped to clamped).
-8. **Autonomy (PoC in progress).** *Decided: 2D.* Mapping is built —
+8. **Autonomy (2D PoC built).** *Decided: 2D.* Mapping is built —
    **`dicerox_mapping`** does 2D SLAM with `slam_toolbox`, taking **ZED2 odometry**
    (filtered to a planar `odom → base_footprint` by `zed_planar_odom`) + the RPLidar
    (`/scan` reframed to `base_laser` by `scan_frame_republisher`), and supports map
@@ -1059,14 +1128,17 @@ Things that are **not yet pinned down** and must be resolved on real hardware:
     bitrate / keyframe interval / SRT latency under a degraded link. CV (YOLO
     hazmat) runs on the clean C920 streams, not the RF driving cams.
 
-12. **Odometry fusion (designed; EKF deferred).** *Decided:* a
+12. **Odometry fusion (EKF built; map-frame EKF deferred).** *Decided + built:* a
     **`robot_localization` EKF** in `rescue_nav` fuses the bridge's `/odom/wheel`
     (track tachometers) with the **ZED2** IMU + VIO into a filtered
-    `odom → base_link`. Start with a single `odom`-frame EKF (add the `map`-frame
-    EKF when SLAM lands); `two_d_mode: true`; the ZED driver must run with
-    `publish_tf: false` so it doesn't fight the EKF. *Built now:* only the
-    **EKF-ready** wheel `nav_msgs/Odometry` on `/odom/wheel` (the EKF node/config
-    is the next task). **Bench items:** measure `wheel_circumference_m` and
+    `odom → base_footprint`. An `adaptive_odom_covariance` node sits in front of the
+    EKF and modulates each source's covariance from live signals (slip, tilt, turn
+    rate, ZED pose-cov) so the EKF rebalances itself — wheel `vx` trusted in straight
+    lines, ZED IMU gyro trusted for yaw, ZED VIO for lateral. It runs as a single
+    `odom`-frame EKF (`two_d_mode: true`); the ZED driver must run with
+    `publish_tf: false` so it doesn't fight the EKF. **Still deferred:** the second,
+    `map`-frame (global) EKF — add when a global heading/position reference is wired.
+    **Bench items:** measure `wheel_circumference_m` and
     `track_width_m`; set `traction_dir_*` and the bridge `gear_ratio` to match
     `config.h` (`TRACTION_GEAR_RATIO=23.333`); confirm the VESC tachometer's
     steps-per-erev; and tune the skid-steer covariances (forward `vx` trusted,

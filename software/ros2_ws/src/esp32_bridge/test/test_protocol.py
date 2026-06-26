@@ -84,3 +84,23 @@ def test_chassis_estop_mirror_emits_only_on_transitions():
     clear = mirror.update(False)
     assert parser.feed(clear) == [(MSG_ESTOP_CLEAR, b'')]
     assert mirror.update(False) is None
+
+
+def test_chassis_estop_mirror_reset_releases_only_when_active():
+    mirror = ChassisEstopMirror()
+    parser = FrameParser()
+
+    # Reset is a no-op when the chassis was not holding the arm e-stopped (so a
+    # vanished chassis that was never in e-stop sends nothing to the arm).
+    assert mirror.reset() is None
+
+    # Chassis goes into e-stop, then its link disappears: reset clears the mirror
+    # and yields a clear frame so the bridge can release the arm.
+    mirror.update(True)
+    clear = mirror.reset()
+    assert parser.feed(clear) == [(MSG_ESTOP_CLEAR, b'')]
+    assert mirror.active is False
+    # Already cleared → a second reset is a no-op.
+    assert mirror.reset() is None
+    # A chassis that reconnects and re-asserts e-stop transitions cleanly again.
+    assert parser.feed(mirror.update(True)) == [(MSG_ESTOP, b'')]

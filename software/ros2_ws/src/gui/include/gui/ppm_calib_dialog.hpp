@@ -6,6 +6,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/int16_multi_array.hpp>
 
+class QDoubleSpinBox;
 class QLabel;
 class QProgressBar;
 class QSpinBox;
@@ -53,6 +54,9 @@ private:
     QSpinBox*     min_spins_[6];
     QSpinBox*     neutral_spins_[6];
     QSpinBox*     max_spins_[6];
+
+    // Global normalized stick deadband (0.00–0.50); maps to ppm_deadband_1000.
+    QDoubleSpinBox* deadband_spin_;
 
     int live_us_[6] = {};   // latest raw values — used by "Capture Center"
 };

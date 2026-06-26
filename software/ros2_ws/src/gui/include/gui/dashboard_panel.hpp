@@ -57,6 +57,8 @@ signals:
     void armStateUpdated(const QString& state);
     void armModeUpdated(const QString& mode);
     void armPresenceUpdated(int mask);
+    // Autonomy drive state from the bridge (ROS thread → Qt thread).
+    void autonomyStateUpdated(bool enabled);
     // Sensor stack lifecycle (ZED + RPLidar via the Jetson robot_manager).
     void sensorsStatusUpdated(const QString& status);
     // I2C sensor stack lifecycle (thermal + magnetometer).
@@ -72,6 +74,8 @@ public slots:
 
 private slots:
     void onEstopToggled(bool checked);
+    void onAutonomyToggled(bool checked);
+    void onAutonomyStateUpdated(bool enabled);
     void onAudioToggled(bool checked);
     void onTranscriptionUpdated(const QString& text);
     void onMagnetometerUpdated(double x, double y, double z);
@@ -160,6 +164,15 @@ private:
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr estop_pub_;
     QTimer*           estop_timer_;
     std::atomic<bool> estop_active_{false};
+
+    // ── Autonomy drive (/cmd_vel → tracks) runtime allow/prevent ──────────────
+    // Extra safety layer on top of the firmware's RC-stick-neutral arbitration: the
+    // button gates whether Nav2's /cmd_vel can move the tracks. The bridge latches it
+    // OFF when the operator touches a drive stick or virtual-flip, so the button is
+    // driven by /autonomy/state (authoritative), not just local clicks.
+    QPushButton* autonomy_btn_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr autonomy_enable_pub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr autonomy_state_sub_;
 
     // ── Arm lifecycle (boots disarmed; arm/disarm + dexterity/chassis idle) ───
     QLabel*      arm_state_indicator_;   // colored LED

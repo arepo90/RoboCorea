@@ -114,14 +114,20 @@ static void drawLabel(cv::Mat& img, const std::string& text,
                       cv::Point origin, const cv::Scalar& color)
 {
     const float scale = AppSettings::instance().label_font_scale_x100.load() / 100.0f;
-    const int   thick = (scale > 0.8f) ? 2 : 1;
+    // Bold + anti-aliased so labels stay legible on noisy video. Stroke scales
+    // with the font and never drops below 2 (thickness 1 looked hairline-thin).
+    const int   thick = std::max(2, static_cast<int>(scale * 2.5f + 0.5f));
     int baseline = 0;
     auto sz = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, scale, thick, &baseline);
-    cv::Point tl(origin.x, origin.y - sz.height - 6);
-    cv::Point br(origin.x + sz.width + 6, origin.y);
-    cv::rectangle(img, tl, br, color, -1);
-    cv::putText(img, text, cv::Point(origin.x + 3, origin.y - 4),
-                cv::FONT_HERSHEY_SIMPLEX, scale, cv::Scalar(0, 0, 0), thick);
+    cv::Point tl(origin.x, origin.y - sz.height - baseline - 6);
+    cv::Point br(origin.x + sz.width + 10, origin.y);
+    cv::rectangle(img, tl, br, color, cv::FILLED);
+    // Pick black or white text by box luminance so it reads on any class colour.
+    const double lum = 0.114 * color[0] + 0.587 * color[1] + 0.299 * color[2];
+    const cv::Scalar txt = (lum > 140.0) ? cv::Scalar(0, 0, 0)
+                                         : cv::Scalar(255, 255, 255);
+    cv::putText(img, text, cv::Point(origin.x + 5, origin.y - 5),
+                cv::FONT_HERSHEY_SIMPLEX, scale, txt, thick, cv::LINE_AA);
 }
 
 static cv::Mat letterbox(const cv::Mat& src, int target,

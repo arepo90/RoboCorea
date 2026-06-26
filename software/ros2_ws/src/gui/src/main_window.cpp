@@ -212,7 +212,7 @@ void MainWindow::publishPpmCalib()
 {
     auto& S = AppSettings::instance();
     std_msgs::msg::UInt16MultiArray msg;
-    msg.data.resize(18);   // 6 channels × {min, neutral, max}
+    msg.data.resize(19);   // 6 channels × {min, neutral, max} + deadband×1000
     {
         std::lock_guard<std::mutex> lk(S.ppm_calib_mutex);
         for (int c = 0; c < 6; ++c) {
@@ -221,5 +221,7 @@ void MainWindow::publishPpmCalib()
             msg.data[c * 3 + 2] = static_cast<uint16_t>(S.ppm_calib[c].max_us);
         }
     }
+    // 19th value = global deadband ×1000 (firmware + bridge both require length 19).
+    msg.data[18] = static_cast<uint16_t>(S.ppm_deadband_1000.load());
     ppm_calib_pub_->publish(msg);
 }

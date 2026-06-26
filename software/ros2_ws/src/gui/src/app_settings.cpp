@@ -61,6 +61,8 @@ void AppSettings::load()
             }
         }
     }
+    if (o.contains("ppm_deadband_1000"))
+        ppm_deadband_1000 = o["ppm_deadband_1000"].toInt(50);
 
     std::lock_guard<std::mutex> lk(video_mutex);
     if (o.contains("default_robot_host"))
@@ -109,6 +111,7 @@ void AppSettings::save()
         }
         o["ppm_calib"] = arr;
     }
+    o["ppm_deadband_1000"] = ppm_deadband_1000.load();
 
     {
         std::lock_guard<std::mutex> lk(video_mutex);

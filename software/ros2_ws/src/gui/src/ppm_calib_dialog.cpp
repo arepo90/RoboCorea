@@ -1,14 +1,18 @@
 #include "gui/ppm_calib_dialog.hpp"
 #include "gui/app_settings.hpp"
 
+#include <QDoubleSpinBox>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QVBoxLayout>
+
+#include <cmath>
 
 const char* PpmCalibDialog::CH_NAMES[6] = {
     "Ch1", "Ch2", "Ch3", "Ch4", "Ch5", "Ch6"
@@ -130,6 +134,30 @@ PpmCalibDialog::PpmCalibDialog(rclcpp::Node::SharedPtr node, QWidget* parent)
     grid->setColumnStretch(1, 1);   // bar column stretches
     root->addWidget(grid_group);
 
+    // ── Global deadband ────────────────────────────────────────────────────────
+    // One normalized deadband (fraction of stick travel) applied to all analog
+    // sticks. Propagated as the 19th value of /robot/ppm_calib → the firmware (RC
+    // neutral zone) and the bridge (autonomy→teleop override threshold).
+    {
+        auto* db_group = new QGroupBox("Stick Deadband", this);
+        auto* db_row = new QHBoxLayout(db_group);
+        db_row->setContentsMargins(8, 6, 8, 6);
+        auto* db_lbl = new QLabel("Deadband (fraction of stick travel):", db_group);
+        deadband_spin_ = new QDoubleSpinBox(db_group);
+        deadband_spin_->setRange(0.0, 0.50);
+        deadband_spin_->setSingleStep(0.01);
+        deadband_spin_->setDecimals(2);
+        deadband_spin_->setValue(0.05);
+        deadband_spin_->setToolTip(
+            "Normalized neutral zone for the analog sticks (0.05 = 5% of travel).\n"
+            "Applied on the robot (RC neutral) and on the bridge (the threshold that\n"
+            "hands autonomy back to teleop when you nudge a drive stick).");
+        db_row->addWidget(db_lbl);
+        db_row->addWidget(deadband_spin_);
+        db_row->addStretch();
+        root->addWidget(db_group);
+    }
+
     // ── Buttons ───────────────────────────────────────────────────────────────
     root->addStretch();
     auto* sep = new QFrame(this);
@@ -177,23 +205,29 @@ PpmCalibDialog::~PpmCalibDialog()
 void PpmCalibDialog::reloadFromSettings()
 {
     auto& S = AppSettings::instance();
-    std::lock_guard<std::mutex> lk(S.ppm_calib_mutex);
-    for (int c = 0; c < 6; ++c) {
-        min_spins_[c]    ->setValue(S.ppm_calib[c].min_us);
-        neutral_spins_[c]->setValue(S.ppm_calib[c].neutral_us);
-        max_spins_[c]    ->setValue(S.ppm_calib[c].max_us);
+    {
+        std::lock_guard<std::mutex> lk(S.ppm_calib_mutex);
+        for (int c = 0; c < 6; ++c) {
+            min_spins_[c]    ->setValue(S.ppm_calib[c].min_us);
+            neutral_spins_[c]->setValue(S.ppm_calib[c].neutral_us);
+            max_spins_[c]    ->setValue(S.ppm_calib[c].max_us);
+        }
     }
+    deadband_spin_->setValue(S.ppm_deadband_1000.load() / 1000.0);
 }
 
 void PpmCalibDialog::applyToSettings()
 {
     auto& S = AppSettings::instance();
-    std::lock_guard<std::mutex> lk(S.ppm_calib_mutex);
-    for (int c = 0; c < 6; ++c) {
-        S.ppm_calib[c].min_us     = min_spins_[c]    ->value();
-        S.ppm_calib[c].neutral_us = neutral_spins_[c]->value();
-        S.ppm_calib[c].max_us     = max_spins_[c]    ->value();
+    {
+        std::lock_guard<std::mutex> lk(S.ppm_calib_mutex);
+        for (int c = 0; c < 6; ++c) {
+            S.ppm_calib[c].min_us     = min_spins_[c]    ->value();
+            S.ppm_calib[c].neutral_us = neutral_spins_[c]->value();
+            S.ppm_calib[c].max_us     = max_spins_[c]    ->value();
+        }
     }
+    S.ppm_deadband_1000 = static_cast<int>(std::lround(deadband_spin_->value() * 1000.0));
 }
 
 // ── Slots ─────────────────────────────────────────────────────────────────────

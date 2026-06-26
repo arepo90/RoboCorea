@@ -75,6 +75,11 @@ struct AppSettings {
     std::mutex      ppm_calib_mutex;
     PpmChannelCalib ppm_calib[6] = {};
 
+    // Global RC stick deadband, normalized ×1000 (50 = 0.05). Sent as the 19th value
+    // of /robot/ppm_calib; the firmware (RC stick neutral zone) and the esp32_bridge
+    // (autonomy→teleop override threshold) both consume it. Atomic — no mutex needed.
+    std::atomic<int> ppm_deadband_1000{50};
+
 private:
     AppSettings() = default;
     AppSettings(const AppSettings&) = delete;

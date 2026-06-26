@@ -9,6 +9,7 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QMessageBox>
+#include <QSignalBlocker>
 #include <QTextEdit>
 #include <QVBoxLayout>
 
@@ -271,6 +272,27 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         "QPushButton:checked { background-color: #cc0000; border-color: #ff3333; }");
     connect(estop_btn_, &QPushButton::toggled, this, &DashboardPanel::onEstopToggled);
     layout->addWidget(estop_btn_);
+
+    // ── Autonomy drive (/cmd_vel → tracks) ───────────────────────────────────
+    // One-click allow/prevent for Nav2 driving the tracks. The firmware still
+    // requires the RC drive sticks to be neutral; this is the extra software gate.
+    // The button reflects /autonomy/state, so an operator RC override (which the
+    // bridge latches) un-checks it and forces a deliberate re-enable here.
+    autonomy_btn_ = new QPushButton("AUTO DRIVE: OFF", this);
+    autonomy_btn_->setCheckable(true);
+    autonomy_btn_->setMinimumHeight(34);
+    autonomy_btn_->setToolTip(
+        "Allow Nav2 /cmd_vel to drive the tracks (autonomy).\n"
+        "Even when ON, the tracks only move while the RC drive sticks are neutral.\n"
+        "Touching a drive stick or virtual-flip hands control back and turns this OFF.");
+    autonomy_btn_->setStyleSheet(
+        "QPushButton { background-color: #2a3a2a; color: #cfcfcf; padding: 6px; "
+        "border: 2px solid #3a5a3a; border-radius: 5px; font-weight: bold; }"
+        "QPushButton:hover { background-color: #344a34; }"
+        "QPushButton:checked { background-color: #c8870a; color: black; "
+        "border-color: #ffb13a; }");
+    connect(autonomy_btn_, &QPushButton::toggled, this, &DashboardPanel::onAutonomyToggled);
+    layout->addWidget(autonomy_btn_);
 
     // ── Arm lifecycle (boots disarmed; arm/disarm + dexterity/chassis idle) ───
     add_hsep();
@@ -554,6 +576,20 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     connect(estop_timer_, &QTimer::timeout, this, &DashboardPanel::publishEstopState);
     estop_timer_->start(100);
 
+    // ── Autonomy enable/state (ROS thread → Qt via queued signal) ─────────────
+    // /autonomy/enable is the operator request (VOLATILE: a bridge restart must not
+    // auto-resume from a latched "true"). /autonomy/state is the bridge's actual,
+    // latched state that drives the button so RC overrides are reflected here.
+    connect(this, &DashboardPanel::autonomyStateUpdated,
+            this, &DashboardPanel::onAutonomyStateUpdated, Qt::QueuedConnection);
+    autonomy_enable_pub_ = node_->create_publisher<std_msgs::msg::Bool>(
+        "/autonomy/enable", rclcpp::QoS(10).reliable());
+    autonomy_state_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+        "/autonomy/state", rclcpp::QoS(1).reliable().transient_local(),
+        [this](std_msgs::msg::Bool::SharedPtr msg) {
+            emit autonomyStateUpdated(msg->data);
+        });
+
     // ── Arm lifecycle (ROS thread → Qt via queued signals) ───────────────────
     connect(this, &DashboardPanel::armStateUpdated,
             this, &DashboardPanel::onArmStateUpdated, Qt::QueuedConnection);
@@ -709,6 +745,28 @@ void DashboardPanel::onEstopToggled(bool checked)
 {
     estop_active_ = checked;
     publishEstopState();
+}
+
+void DashboardPanel::onAutonomyToggled(bool checked)
+{
+    // One-click request to the bridge. Update the label optimistically to match the
+    // click; the authoritative /autonomy/state echo (onAutonomyStateUpdated) confirms
+    // or corrects it (e.g. the bridge may latch it straight back off on an RC override).
+    autonomy_btn_->setText(checked ? "AUTO DRIVE: ON" : "AUTO DRIVE: OFF");
+    std_msgs::msg::Bool msg;
+    msg.data = checked;
+    autonomy_enable_pub_->publish(msg);
+    RCLCPP_INFO(node_->get_logger(), "Autonomy drive %s requested",
+                checked ? "ENABLE" : "DISABLE");
+}
+
+void DashboardPanel::onAutonomyStateUpdated(bool enabled)
+{
+    // Reflect the bridge's authoritative state without re-emitting toggled() (which
+    // would re-publish /autonomy/enable). The bridge latches this OFF on an RC override.
+    QSignalBlocker block(autonomy_btn_);
+    autonomy_btn_->setChecked(enabled);
+    autonomy_btn_->setText(enabled ? "AUTO DRIVE: ON" : "AUTO DRIVE: OFF");
 }
 
 void DashboardPanel::onAudioToggled(bool checked)
