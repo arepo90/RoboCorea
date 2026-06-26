@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<package format="3">
+  <name>rescue_mapping3d</name>
+  <version>0.1.0</version>
+  <description>
+    On-robot volumetric (OctoMap) mapper. Builds an octree from the ZED2 point
+    cloud + the SLAM/EKF TF tree entirely on the Jetson and publishes only the
+    compressed binary octree (/robot/map3d, latched, low-rate) over DDS — the raw
+    cloud never crosses the network.
+  </description>
+  <maintainer email="gerardodelcid16@gmail.com">Gerardo</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>octomap_msgs</depend>
+  <depend>octomap</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

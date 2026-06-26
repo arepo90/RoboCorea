@@ -467,6 +467,49 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         layout->addLayout(map_btn_row);
     }
 
+    // ── 3-D mapping (OctoMap on the Jetson; only the octree crosses the net) ──
+    add_hsep();
+    {
+        auto* m3_hdr_row = new QHBoxLayout();
+        auto* m3_hdr = new QLabel("3D Mapping", this);
+        m3_hdr->setStyleSheet(hdr_style);
+        mapping3d_indicator_ = new QLabel("●", this);
+        mapping3d_indicator_->setStyleSheet("color: #888; font-size: 14px;");
+        mapping3d_label_ = new QLabel("—", this);
+        mapping3d_label_->setStyleSheet("color: #888; font-size: 12px;");
+        m3_hdr_row->addWidget(m3_hdr);
+        m3_hdr_row->addStretch();
+        m3_hdr_row->addWidget(mapping3d_indicator_);
+        m3_hdr_row->addWidget(mapping3d_label_);
+        layout->addLayout(m3_hdr_row);
+
+        auto* m3_btn_row = new QHBoxLayout();
+        m3_btn_row->setSpacing(4);
+        mapping3d_start_btn_ = new QPushButton("Start 3D", this);
+        mapping3d_start_btn_->setMinimumHeight(28);
+        mapping3d_start_btn_->setToolTip("Start OctoMap volumetric mapping on the robot "
+                                         "(rescue-mapping3d.service). Start sensors + SLAM first.");
+        mapping3d_start_btn_->setStyleSheet(btn_style("#1a5a2a", "#2a7a3a", "#0a3a1a"));
+        connect(mapping3d_start_btn_, &QPushButton::clicked, this, &DashboardPanel::onMapping3dStartClicked);
+        m3_btn_row->addWidget(mapping3d_start_btn_);
+
+        mapping3d_stop_btn_ = new QPushButton("Stop", this);
+        mapping3d_stop_btn_->setMinimumHeight(28);
+        mapping3d_stop_btn_->setToolTip("Cleanly stop 3-D mapping on the robot");
+        mapping3d_stop_btn_->setStyleSheet(btn_style("#5a2a2a", "#7a3a3a", "#3a1a1a"));
+        connect(mapping3d_stop_btn_, &QPushButton::clicked, this, &DashboardPanel::onMapping3dStopClicked);
+        m3_btn_row->addWidget(mapping3d_stop_btn_);
+
+        open_3dmap_btn_ = new QPushButton("Open 3D Map", this);
+        open_3dmap_btn_->setMinimumHeight(28);
+        open_3dmap_btn_->setToolTip("Open the live map window (renders /robot/map3d voxels + robot)");
+        open_3dmap_btn_->setStyleSheet(btn_style("#2a4a7f", "#3a5a9f", "#1a3a6f"));
+        connect(open_3dmap_btn_, &QPushButton::clicked, this, &DashboardPanel::onOpenMapClicked);
+        m3_btn_row->addWidget(open_3dmap_btn_);
+
+        layout->addLayout(m3_btn_row);
+    }
+
     auto* btn_row = new QHBoxLayout();
     btn_row->setSpacing(4);
 
@@ -571,6 +614,17 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         });
     mapping_start_cli_ = node_->create_client<std_srvs::srv::Trigger>("/robot/mapping/start");
     mapping_stop_cli_  = node_->create_client<std_srvs::srv::Trigger>("/robot/mapping/stop");
+
+    // ── 3-D mapping (OctoMap) stack ──────────────────────────────────────────
+    connect(this, &DashboardPanel::mapping3dStatusUpdated,
+            this, &DashboardPanel::onMapping3dStatusUpdated, Qt::QueuedConnection);
+    mapping3d_status_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/robot/mapping3d/status", arm_qos,
+        [this](std_msgs::msg::String::SharedPtr msg) {
+            emit mapping3dStatusUpdated(QString::fromStdString(msg->data));
+        });
+    mapping3d_start_cli_ = node_->create_client<std_srvs::srv::Trigger>("/robot/mapping3d/start");
+    mapping3d_stop_cli_  = node_->create_client<std_srvs::srv::Trigger>("/robot/mapping3d/stop");
 }
 
 void DashboardPanel::setConnState(const QString& color, const QString& label)
@@ -932,10 +986,55 @@ void DashboardPanel::onMappingStatusUpdated(const QString& status)
 
 void DashboardPanel::onOpenMapClicked()
 {
-    // Lazily create the standalone 2-D map window; just raise it if it exists.
+    // Lazily create the standalone map window; just raise it if it exists.
     if (!map_window_)
         map_window_ = new MapWindow(node_);   // top-level (no parent) so it's its own window
     map_window_->show();
     map_window_->raise();
     map_window_->activateWindow();
+}
+
+// ── 3-D mapping (OctoMap) stack ──────────────────────────────────────────────
+void DashboardPanel::onMapping3dStartClicked()
+{
+    if (!mapping3d_start_cli_->service_is_ready()) {
+        RCLCPP_WARN(node_->get_logger(),
+                    "3D mapping start requested but the service is unavailable "
+                    "(is robot_manager running on the Jetson?)");
+        return;
+    }
+    mapping3d_start_cli_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    setStackPending(mapping3d_indicator_, mapping3d_label_, "activating…");
+    RCLCPP_INFO(node_->get_logger(), "3D mapping: start requested");
+}
+
+void DashboardPanel::onMapping3dStopClicked()
+{
+    if (!mapping3d_stop_cli_->service_is_ready()) {
+        RCLCPP_WARN(node_->get_logger(),
+                    "3D mapping stop requested but the service is unavailable "
+                    "(is robot_manager running on the Jetson?)");
+        return;
+    }
+    mapping3d_stop_cli_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    setStackPending(mapping3d_indicator_, mapping3d_label_, "deactivating…");
+    RCLCPP_INFO(node_->get_logger(), "3D mapping: stop requested");
+}
+
+void DashboardPanel::onMapping3dStatusUpdated(const QString& status)
+{
+    mapping3d_label_->setText(status);
+    const QString s = status.section(' ', 0, 0);
+
+    QString color = "#888";
+    if (s == "active")           color = "#33cc33";
+    else if (s == "activating")  color = "#ccaa00";
+    else if (s == "partial")     color = "#ccaa00";
+    else if (s == "failed")      color = "#cc3333";
+    mapping3d_indicator_->setStyleSheet(QString("color: %1; font-size: 14px;").arg(color));
+    mapping3d_label_->setStyleSheet(QString("color: %1; font-size: 12px;").arg(color));
+
+    const bool active = (s == "active");
+    mapping3d_start_btn_->setEnabled(!active && s != "activating");
+    mapping3d_stop_btn_->setEnabled(s != "inactive");
 }

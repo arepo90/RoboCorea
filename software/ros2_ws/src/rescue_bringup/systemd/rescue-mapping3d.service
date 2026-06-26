@@ -1,0 +1,15 @@
+[Unit]
+Description=RoboCorea 3-D volumetric mapping (OctoMap on the Jetson)
+# On-demand, started by robot_manager. Builds an octree from the ZED2 cloud +
+# TF entirely on the robot and publishes only the compressed binary octree on
+# /robot/map3d (latched, ~1 Hz). The raw cloud never leaves the Jetson. Needs the
+# sensors stack (ZED cloud) and the mapping stack (map->odom->base TF) running.
+
+[Service]
+# Must match the workstation/GUI domain.
+Environment=ROS_DOMAIN_ID=20
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch rescue_mapping3d mapping3d.launch.py'
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=10
+Restart=no
