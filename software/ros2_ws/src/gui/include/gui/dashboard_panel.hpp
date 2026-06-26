@@ -45,17 +45,10 @@ public:
     // MainWindow after the settings dialog applies/resets.
     void applySpeechAudioSettings();
 
-    // Request a stop of every robot_manager-managed stack (mapping3d, mapping,
-    // i2c, sensors — dependents first). Called from MainWindow::closeEvent so
-    // closing the GUI tears the robot's perception stacks down cleanly. Blocks
-    // briefly (best-effort) so the requests are delivered before shutdown; if
-    // robot_manager isn't reachable, the clients simply aren't ready and it's a
-    // no-op.
-    void stopAllStacks();
-
 signals:
     void resetSourcesRequested();
     void settingsRequested();
+    void systemsRequested();   // open the Robot Systems window (toolbar icon)
     void audioMonitorToggled(bool enabled);  // → GstAvStream playback
     void magnetometerUpdated(double x, double y, double z);
     void imuUpdated(double yaw, double pitch, double roll);
@@ -67,14 +60,6 @@ signals:
     void armPresenceUpdated(int mask);
     // Autonomy drive state from the bridge (ROS thread → Qt thread).
     void autonomyStateUpdated(bool enabled);
-    // Sensor stack lifecycle (ZED + RPLidar via the Jetson robot_manager).
-    void sensorsStatusUpdated(const QString& status);
-    // I2C sensor stack lifecycle (thermal + magnetometer).
-    void i2cStatusUpdated(const QString& status);
-    // Mapping/SLAM stack lifecycle (slam_toolbox + EKF on the Jetson).
-    void mappingStatusUpdated(const QString& status);
-    // 3-D mapping (OctoMap) stack lifecycle.
-    void mapping3dStatusUpdated(const QString& status);
 
 public slots:
     // Called by VideoPanel when any widget selects/deselects the thermal source.
@@ -101,25 +86,8 @@ private slots:
     void onArmClicked();
     void onDisarmClicked();
     void onArmModeToggle();
-    // Sensor stack
-    void onSensorsStatusUpdated(const QString& status);
-    void onSensorsStartClicked();
-    void onSensorsStopClicked();
-    // I2C sensor stack (thermal + magnetometer)
-    void onI2cStatusUpdated(const QString& status);
-    void onI2cStartClicked();
-    void onI2cStopClicked();
+    // Thermal acquisition enable (/sensors/enable_mask bit1).
     void onThermalToggled();
-    // Mapping/SLAM stack
-    void onMappingStatusUpdated(const QString& status);
-    void onMappingStartClicked();
-    void onMappingStopClicked();
-    void onOpenMapClicked();
-    // 3-D mapping (OctoMap)
-    void onMapping3dStatusUpdated(const QString& status);
-    void onMapping3dStartClicked();
-    void onMapping3dStopClicked();
-    void onOpen3dMapClicked();
 
 private:
     void setConnState(const QString& color, const QString& label);
@@ -166,6 +134,7 @@ private:
     QPushButton* clear_btn_;
     QPushButton* reset_btn_;
     QPushButton* settings_btn_;
+    QPushButton* systems_btn_;   // opens the Robot Systems window
     QPushButton* estop_btn_;
 
     // E-STOP (republished ~10 Hz)
@@ -201,46 +170,9 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_dexterity_cli_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_chassis_cli_;
 
-    // ── Sensor stack (ZED + RPLidar, started/stopped on the Jetson via systemd) ─
-    QLabel*      sensors_indicator_{nullptr};   // colored LED
-    QLabel*      sensors_label_{nullptr};       // active / inactive / activating / …
-    QPushButton* sensors_start_btn_{nullptr};
-    QPushButton* sensors_stop_btn_{nullptr};
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sensors_status_sub_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr sensors_start_cli_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr sensors_stop_cli_;
-
-    // ── I2C sensor stack (MLX90640 thermal + LIS3MDL mag, Jetson robot_manager) ─
-    // Process lifecycle (start/stop the jetson_sensors driver) + per-sensor
-    // runtime enable via /sensors/enable_mask (thermal bit1, mag bit0).
+    // ── Thermal acquisition enable (/sensors/enable_mask bit1) ────────────────
+    // The dashboard owns the enable mask; the I2C *driver* lifecycle lives in the
+    // Robot Systems window now. Also auto-driven by the video panel's thermal
+    // source selection (setThermalEnabled).
     QPushButton* thermal_toggle_{nullptr};   // /sensors/enable_mask bit1
-    QLabel*      i2c_indicator_{nullptr};
-    QLabel*      i2c_label_{nullptr};
-    QPushButton* i2c_start_btn_{nullptr};
-    QPushButton* i2c_stop_btn_{nullptr};
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr i2c_status_sub_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr i2c_start_cli_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr i2c_stop_cli_;
-
-    // ── Mapping/SLAM stack (slam_toolbox + EKF on the Jetson) ─────────────────
-    QLabel*      mapping_indicator_{nullptr};
-    QLabel*      mapping_label_{nullptr};
-    QPushButton* mapping_start_btn_{nullptr};
-    QPushButton* mapping_stop_btn_{nullptr};
-    QPushButton* open_map_btn_{nullptr};     // opens the local 2D map window
-    QWidget*     map_window_{nullptr};       // MapWindow (created lazily)
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mapping_status_sub_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping_start_cli_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping_stop_cli_;
-
-    // ── 3-D mapping (OctoMap) stack ──────────────────────────────────────────
-    QLabel*      mapping3d_indicator_{nullptr};
-    QLabel*      mapping3d_label_{nullptr};
-    QPushButton* mapping3d_start_btn_{nullptr};
-    QPushButton* mapping3d_stop_btn_{nullptr};
-    QPushButton* open_3dmap_btn_{nullptr};
-    QWidget*     map3d_window_{nullptr};     // 3-D MapWindow (created lazily)
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mapping3d_status_sub_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping3d_start_cli_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping3d_stop_cli_;
 };

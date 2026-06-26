@@ -1,0 +1,11 @@
+# Save the currently-built map under a name (robot-side; map files live on the
+# Jetson). `kind` selects which artifact(s) to write:
+#   "2d"  -> slam_toolbox serialized posegraph + nav2 occupancy grid (pgm/yaml)
+#   "3d"  -> OctoMap binary tree (.bt)
+# Overwrites an existing artifact of the same kind under that name.
+string name
+string kind                  # "2d" | "3d"
+---
+bool success
+string message
+string path                  # absolute directory the artifact(s) were written to

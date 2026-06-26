@@ -1,7 +1,6 @@
 #include "gui/dashboard_panel.hpp"
 #include "gui/speech_processor.hpp"
 #include "gui/app_settings.hpp"
-#include "gui/map_window.hpp"
 
 #include <QFont>
 #include <QGraphicsOpacityEffect>
@@ -13,20 +12,7 @@
 #include <QTextEdit>
 #include <QVBoxLayout>
 
-#include <chrono>
 #include <cmath>
-#include <vector>
-
-// Instant amber "pending" feedback on a stack's status LED+label the moment a
-// start/stop is clicked, so the UI responds immediately instead of waiting for
-// the status topic round-trip from the robot.
-static void setStackPending(QLabel* indicator, QLabel* label, const QString& text)
-{
-    if (!indicator || !label) return;
-    label->setText(text);
-    indicator->setStyleSheet("color: #ccaa00; font-size: 14px;");
-    label->setStyleSheet("color: #ccaa00; font-size: 12px;");
-}
 
 DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     : QWidget(parent), node_(node)
@@ -123,6 +109,25 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         auto* row = new QHBoxLayout();
         row->addWidget(make_axis(lbl));
         row->addWidget(val, 1);
+        layout->addLayout(row);
+    }
+
+    // ── Thermal acquisition enable ────────────────────────────────────────────
+    // The dashboard owns /sensors/enable_mask (bit0 mag, bit1 thermal); the I2C
+    // *driver* lifecycle moved to the Robot Systems window, but these per-sensor
+    // runtime enables stay here with the readouts. The mask is latched, so a
+    // toggle takes effect whenever the jetson_sensors driver is (re)started.
+    {
+        auto* row = new QHBoxLayout();
+        row->setSpacing(4);
+        auto* thermal_lbl = new QLabel("Thermal acquisition", this);
+        thermal_lbl->setStyleSheet(lbl_style);
+        thermal_toggle_ = make_sensor_toggle();
+        thermal_toggle_->setToolTip("Enable thermal acquisition (enable_mask bit 1). "
+                                    "Also auto-enabled when the thermal video source is selected.");
+        connect(thermal_toggle_, &QPushButton::toggled, this, &DashboardPanel::onThermalToggled);
+        row->addWidget(thermal_lbl, 1);
+        row->addWidget(thermal_toggle_);
         layout->addLayout(row);
     }
 
@@ -357,182 +362,8 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         layout->addLayout(arm_btn_row);
     }
 
-    // ── Sensor stack (ZED + RPLidar; started/stopped on the Jetson via systemd) ─
-    add_hsep();
-    {
-        auto* sens_hdr_row = new QHBoxLayout();
-        auto* sens_hdr = new QLabel("Sensors", this);
-        sens_hdr->setStyleSheet(hdr_style);
-        sensors_indicator_ = new QLabel("●", this);
-        sensors_indicator_->setStyleSheet("color: #888; font-size: 14px;");
-        sensors_label_ = new QLabel("—", this);
-        sensors_label_->setStyleSheet("color: #888; font-size: 12px;");
-        sens_hdr_row->addWidget(sens_hdr);
-        sens_hdr_row->addStretch();
-        sens_hdr_row->addWidget(sensors_indicator_);
-        sens_hdr_row->addWidget(sensors_label_);
-        layout->addLayout(sens_hdr_row);
-
-        auto* sens_btn_row = new QHBoxLayout();
-        sens_btn_row->setSpacing(4);
-
-        sensors_start_btn_ = new QPushButton("Start ZED+Lidar", this);
-        sensors_start_btn_->setMinimumHeight(28);
-        sensors_start_btn_->setToolTip("Start the ZED + RPLidar stack on the robot "
-                                       "(systemd rescue-sensors.target via robot_manager)");
-        sensors_start_btn_->setStyleSheet(btn_style("#1a5a2a", "#2a7a3a", "#0a3a1a"));
-        connect(sensors_start_btn_, &QPushButton::clicked, this,
-                &DashboardPanel::onSensorsStartClicked);
-        sens_btn_row->addWidget(sensors_start_btn_);
-
-        sensors_stop_btn_ = new QPushButton("Stop", this);
-        sensors_stop_btn_->setMinimumHeight(28);
-        sensors_stop_btn_->setToolTip("Cleanly stop the ZED + RPLidar stack on the robot");
-        sensors_stop_btn_->setStyleSheet(btn_style("#5a2a2a", "#7a3a3a", "#3a1a1a"));
-        connect(sensors_stop_btn_, &QPushButton::clicked, this,
-                &DashboardPanel::onSensorsStopClicked);
-        sens_btn_row->addWidget(sensors_stop_btn_);
-
-        layout->addLayout(sens_btn_row);
-    }
-
-    // ── I2C sensors (MLX90640 thermal + LIS3MDL mag; Jetson process + per-sensor) ─
-    add_hsep();
-    {
-        auto* i2c_hdr_row = new QHBoxLayout();
-        auto* i2c_hdr = new QLabel("I2C Sensors", this);
-        i2c_hdr->setStyleSheet(hdr_style);
-        i2c_indicator_ = new QLabel("●", this);
-        i2c_indicator_->setStyleSheet("color: #888; font-size: 14px;");
-        i2c_label_ = new QLabel("—", this);
-        i2c_label_->setStyleSheet("color: #888; font-size: 12px;");
-        i2c_hdr_row->addWidget(i2c_hdr);
-        i2c_hdr_row->addStretch();
-        i2c_hdr_row->addWidget(i2c_indicator_);
-        i2c_hdr_row->addWidget(i2c_label_);
-        layout->addLayout(i2c_hdr_row);
-
-        // Layer 1: start/stop the jetson_sensors driver process on the Jetson.
-        auto* i2c_btn_row = new QHBoxLayout();
-        i2c_btn_row->setSpacing(4);
-        i2c_start_btn_ = new QPushButton("Start I2C", this);
-        i2c_start_btn_->setMinimumHeight(28);
-        i2c_start_btn_->setToolTip("Start the MLX90640 + LIS3MDL driver on the robot "
-                                   "(systemd jetson-sensors.service via robot_manager)");
-        i2c_start_btn_->setStyleSheet(btn_style("#1a5a2a", "#2a7a3a", "#0a3a1a"));
-        connect(i2c_start_btn_, &QPushButton::clicked, this, &DashboardPanel::onI2cStartClicked);
-        i2c_btn_row->addWidget(i2c_start_btn_);
-
-        i2c_stop_btn_ = new QPushButton("Stop", this);
-        i2c_stop_btn_->setMinimumHeight(28);
-        i2c_stop_btn_->setToolTip("Cleanly stop the I2C sensor driver on the robot");
-        i2c_stop_btn_->setStyleSheet(btn_style("#5a2a2a", "#7a3a3a", "#3a1a1a"));
-        connect(i2c_stop_btn_, &QPushButton::clicked, this, &DashboardPanel::onI2cStopClicked);
-        i2c_btn_row->addWidget(i2c_stop_btn_);
-        layout->addLayout(i2c_btn_row);
-
-        // Layer 2: per-sensor runtime enable via /sensors/enable_mask. A disabled
-        // sensor stops touching the bus, so this is the shared-bus-safe control.
-        auto* en_row = new QHBoxLayout();
-        en_row->setSpacing(4);
-        auto* thermal_lbl = new QLabel("Thermal", this);
-        thermal_lbl->setStyleSheet(lbl_style);
-        thermal_toggle_ = make_sensor_toggle();   // OFF by default (mask bit cleared)
-        thermal_toggle_->setToolTip("Enable thermal acquisition (enable_mask bit 1). "
-                                    "Also auto-enabled when the thermal video source is selected.");
-        connect(thermal_toggle_, &QPushButton::toggled, this, &DashboardPanel::onThermalToggled);
-        en_row->addWidget(thermal_lbl);
-        en_row->addWidget(thermal_toggle_);
-        en_row->addStretch();
-        layout->addLayout(en_row);
-    }
-
-    // ── Mapping / SLAM (slam_toolbox + EKF on the Jetson; map viewed here) ─────
-    add_hsep();
-    {
-        auto* map_hdr_row = new QHBoxLayout();
-        auto* map_hdr = new QLabel("Mapping", this);
-        map_hdr->setStyleSheet(hdr_style);
-        mapping_indicator_ = new QLabel("●", this);
-        mapping_indicator_->setStyleSheet("color: #888; font-size: 14px;");
-        mapping_label_ = new QLabel("—", this);
-        mapping_label_->setStyleSheet("color: #888; font-size: 12px;");
-        map_hdr_row->addWidget(map_hdr);
-        map_hdr_row->addStretch();
-        map_hdr_row->addWidget(mapping_indicator_);
-        map_hdr_row->addWidget(mapping_label_);
-        layout->addLayout(map_hdr_row);
-
-        auto* map_btn_row = new QHBoxLayout();
-        map_btn_row->setSpacing(4);
-        mapping_start_btn_ = new QPushButton("Start SLAM", this);
-        mapping_start_btn_->setMinimumHeight(28);
-        mapping_start_btn_->setToolTip("Start slam_toolbox + EKF on the robot "
-                                       "(systemd rescue-mapping.service). Start the "
-                                       "sensors first.");
-        mapping_start_btn_->setStyleSheet(btn_style("#1a5a2a", "#2a7a3a", "#0a3a1a"));
-        connect(mapping_start_btn_, &QPushButton::clicked, this, &DashboardPanel::onMappingStartClicked);
-        map_btn_row->addWidget(mapping_start_btn_);
-
-        mapping_stop_btn_ = new QPushButton("Stop", this);
-        mapping_stop_btn_->setMinimumHeight(28);
-        mapping_stop_btn_->setToolTip("Cleanly stop SLAM + EKF on the robot");
-        mapping_stop_btn_->setStyleSheet(btn_style("#5a2a2a", "#7a3a3a", "#3a1a1a"));
-        connect(mapping_stop_btn_, &QPushButton::clicked, this, &DashboardPanel::onMappingStopClicked);
-        map_btn_row->addWidget(mapping_stop_btn_);
-
-        open_map_btn_ = new QPushButton("Open Map", this);
-        open_map_btn_->setMinimumHeight(28);
-        open_map_btn_->setToolTip("Open a live 2-D map window (subscribes /map + robot pose)");
-        open_map_btn_->setStyleSheet(btn_style("#2a4a7f", "#3a5a9f", "#1a3a6f"));
-        connect(open_map_btn_, &QPushButton::clicked, this, &DashboardPanel::onOpenMapClicked);
-        map_btn_row->addWidget(open_map_btn_);
-
-        layout->addLayout(map_btn_row);
-    }
-
-    // ── 3-D mapping (OctoMap on the Jetson; only the octree crosses the net) ──
-    add_hsep();
-    {
-        auto* m3_hdr_row = new QHBoxLayout();
-        auto* m3_hdr = new QLabel("3D Mapping", this);
-        m3_hdr->setStyleSheet(hdr_style);
-        mapping3d_indicator_ = new QLabel("●", this);
-        mapping3d_indicator_->setStyleSheet("color: #888; font-size: 14px;");
-        mapping3d_label_ = new QLabel("—", this);
-        mapping3d_label_->setStyleSheet("color: #888; font-size: 12px;");
-        m3_hdr_row->addWidget(m3_hdr);
-        m3_hdr_row->addStretch();
-        m3_hdr_row->addWidget(mapping3d_indicator_);
-        m3_hdr_row->addWidget(mapping3d_label_);
-        layout->addLayout(m3_hdr_row);
-
-        auto* m3_btn_row = new QHBoxLayout();
-        m3_btn_row->setSpacing(4);
-        mapping3d_start_btn_ = new QPushButton("Start 3D", this);
-        mapping3d_start_btn_->setMinimumHeight(28);
-        mapping3d_start_btn_->setToolTip("Start OctoMap volumetric mapping on the robot "
-                                         "(rescue-mapping3d.service). Start sensors + SLAM first.");
-        mapping3d_start_btn_->setStyleSheet(btn_style("#1a5a2a", "#2a7a3a", "#0a3a1a"));
-        connect(mapping3d_start_btn_, &QPushButton::clicked, this, &DashboardPanel::onMapping3dStartClicked);
-        m3_btn_row->addWidget(mapping3d_start_btn_);
-
-        mapping3d_stop_btn_ = new QPushButton("Stop", this);
-        mapping3d_stop_btn_->setMinimumHeight(28);
-        mapping3d_stop_btn_->setToolTip("Cleanly stop 3-D mapping on the robot");
-        mapping3d_stop_btn_->setStyleSheet(btn_style("#5a2a2a", "#7a3a3a", "#3a1a1a"));
-        connect(mapping3d_stop_btn_, &QPushButton::clicked, this, &DashboardPanel::onMapping3dStopClicked);
-        m3_btn_row->addWidget(mapping3d_stop_btn_);
-
-        open_3dmap_btn_ = new QPushButton("Open 3D Map", this);
-        open_3dmap_btn_->setMinimumHeight(28);
-        open_3dmap_btn_->setToolTip("Open the live map window (renders /robot/map3d voxels + robot)");
-        open_3dmap_btn_->setStyleSheet(btn_style("#2a4a7f", "#3a5a9f", "#1a3a6f"));
-        connect(open_3dmap_btn_, &QPushButton::clicked, this, &DashboardPanel::onOpen3dMapClicked);
-        m3_btn_row->addWidget(open_3dmap_btn_);
-
-        layout->addLayout(m3_btn_row);
-    }
+    // (Perception/mapping stack controls + the live map windows moved to the
+    // Robot Systems window — opened with the toolbar icon below.)
 
     auto* btn_row = new QHBoxLayout();
     btn_row->setSpacing(4);
@@ -549,6 +380,27 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     clear_btn_->setStyleSheet(btn_style("#4a4a2a", "#6a6a3a", "#3a3a1a"));
     connect(clear_btn_, &QPushButton::clicked, this, &DashboardPanel::onClearAll);
     btn_row->addWidget(clear_btn_);
+
+    // Robot Systems window (perception stacks, maps, autonomous arm routines).
+    systems_btn_ = new QPushButton(this);
+    systems_btn_->setFixedSize(28, 28);
+    systems_btn_->setToolTip("Robot Systems (sensors, mapping, maps, arm routines)");
+    {
+        QIcon icon = QIcon::fromTheme("applications-system");
+        if (!icon.isNull()) {
+            systems_btn_->setIcon(icon);
+            systems_btn_->setIconSize(QSize(16, 16));
+        } else {
+            systems_btn_->setText("⊞");
+        }
+    }
+    systems_btn_->setStyleSheet(
+        "QPushButton { background-color: #2d2d45; color: #ccc; padding: 2px; "
+        "border: 1px solid #3a3a55; border-radius: 3px; }"
+        "QPushButton:hover { background-color: #3a3a55; }");
+    connect(systems_btn_, &QPushButton::clicked, this,
+            [this]() { emit systemsRequested(); });
+    btn_row->addWidget(systems_btn_);
 
     settings_btn_ = new QPushButton(this);
     settings_btn_->setFixedSize(28, 28);
@@ -619,50 +471,6 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     arm_disarm_cli_    = node_->create_client<std_srvs::srv::Trigger>("/arm/disarm");
     arm_dexterity_cli_ = node_->create_client<std_srvs::srv::Trigger>("/arm/mode/dexterity");
     arm_chassis_cli_   = node_->create_client<std_srvs::srv::Trigger>("/arm/mode/chassis");
-
-    // ── Sensor stack (robot_manager on the Jetson) ───────────────────────────
-    connect(this, &DashboardPanel::sensorsStatusUpdated,
-            this, &DashboardPanel::onSensorsStatusUpdated, Qt::QueuedConnection);
-    sensors_status_sub_ = node_->create_subscription<std_msgs::msg::String>(
-        "/robot/sensors/status", arm_qos,
-        [this](std_msgs::msg::String::SharedPtr msg) {
-            emit sensorsStatusUpdated(QString::fromStdString(msg->data));
-        });
-    sensors_start_cli_ = node_->create_client<std_srvs::srv::Trigger>("/robot/sensors/start");
-    sensors_stop_cli_  = node_->create_client<std_srvs::srv::Trigger>("/robot/sensors/stop");
-
-    // ── I2C sensor stack (robot_manager 'i2c' stack on the Jetson) ───────────
-    connect(this, &DashboardPanel::i2cStatusUpdated,
-            this, &DashboardPanel::onI2cStatusUpdated, Qt::QueuedConnection);
-    i2c_status_sub_ = node_->create_subscription<std_msgs::msg::String>(
-        "/robot/i2c/status", arm_qos,
-        [this](std_msgs::msg::String::SharedPtr msg) {
-            emit i2cStatusUpdated(QString::fromStdString(msg->data));
-        });
-    i2c_start_cli_ = node_->create_client<std_srvs::srv::Trigger>("/robot/i2c/start");
-    i2c_stop_cli_  = node_->create_client<std_srvs::srv::Trigger>("/robot/i2c/stop");
-
-    // ── Mapping/SLAM stack (robot_manager 'mapping' stack on the Jetson) ─────
-    connect(this, &DashboardPanel::mappingStatusUpdated,
-            this, &DashboardPanel::onMappingStatusUpdated, Qt::QueuedConnection);
-    mapping_status_sub_ = node_->create_subscription<std_msgs::msg::String>(
-        "/robot/mapping/status", arm_qos,
-        [this](std_msgs::msg::String::SharedPtr msg) {
-            emit mappingStatusUpdated(QString::fromStdString(msg->data));
-        });
-    mapping_start_cli_ = node_->create_client<std_srvs::srv::Trigger>("/robot/mapping/start");
-    mapping_stop_cli_  = node_->create_client<std_srvs::srv::Trigger>("/robot/mapping/stop");
-
-    // ── 3-D mapping (OctoMap) stack ──────────────────────────────────────────
-    connect(this, &DashboardPanel::mapping3dStatusUpdated,
-            this, &DashboardPanel::onMapping3dStatusUpdated, Qt::QueuedConnection);
-    mapping3d_status_sub_ = node_->create_subscription<std_msgs::msg::String>(
-        "/robot/mapping3d/status", arm_qos,
-        [this](std_msgs::msg::String::SharedPtr msg) {
-            emit mapping3dStatusUpdated(QString::fromStdString(msg->data));
-        });
-    mapping3d_start_cli_ = node_->create_client<std_srvs::srv::Trigger>("/robot/mapping3d/start");
-    mapping3d_stop_cli_  = node_->create_client<std_srvs::srv::Trigger>("/robot/mapping3d/stop");
 }
 
 void DashboardPanel::setConnState(const QString& color, const QString& label)
@@ -901,244 +709,4 @@ void DashboardPanel::onArmPresenceUpdated(int mask)
             QString("color: %1; font-size: 10px; font-weight: bold;")
                 .arg(present ? "#33cc33" : "#cc3333"));
     }
-}
-
-// ── Sensor stack (ZED + RPLidar via the Jetson robot_manager) ────────────────
-void DashboardPanel::onSensorsStartClicked()
-{
-    if (!sensors_start_cli_->service_is_ready()) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "Sensors start requested but the service is unavailable "
-                    "(is robot_manager running on the Jetson?)");
-        return;
-    }
-    sensors_start_cli_->async_send_request(
-        std::make_shared<std_srvs::srv::Trigger::Request>());
-    setStackPending(sensors_indicator_, sensors_label_, "activating…");
-    RCLCPP_INFO(node_->get_logger(), "Sensors: start requested");
-}
-
-void DashboardPanel::onSensorsStopClicked()
-{
-    if (!sensors_stop_cli_->service_is_ready()) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "Sensors stop requested but the service is unavailable "
-                    "(is robot_manager running on the Jetson?)");
-        return;
-    }
-    sensors_stop_cli_->async_send_request(
-        std::make_shared<std_srvs::srv::Trigger::Request>());
-    setStackPending(sensors_indicator_, sensors_label_, "deactivating…");
-    RCLCPP_INFO(node_->get_logger(), "Sensors: stop requested");
-}
-
-void DashboardPanel::onSensorsStatusUpdated(const QString& status)
-{
-    // status is "<overall> (zed=… lidar=…)"; the leading word drives the LED.
-    sensors_label_->setText(status);
-    const QString s = status.section(' ', 0, 0);
-
-    QString color = "#888";          // inactive / unknown
-    if (s == "active")           color = "#33cc33";
-    else if (s == "activating")  color = "#ccaa00";
-    else if (s == "partial")     color = "#ccaa00";
-    else if (s == "failed")      color = "#cc3333";
-    sensors_indicator_->setStyleSheet(QString("color: %1; font-size: 14px;").arg(color));
-    sensors_label_->setStyleSheet(QString("color: %1; font-size: 12px;").arg(color));
-
-    const bool active = (s == "active");
-    sensors_start_btn_->setEnabled(!active && s != "activating");
-    sensors_stop_btn_->setEnabled(s != "inactive");
-}
-
-// ── I2C sensor stack (thermal + magnetometer via robot_manager 'i2c') ────────
-void DashboardPanel::onI2cStartClicked()
-{
-    if (!i2c_start_cli_->service_is_ready()) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "I2C start requested but the service is unavailable "
-                    "(is robot_manager running on the Jetson?)");
-        return;
-    }
-    i2c_start_cli_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
-    setStackPending(i2c_indicator_, i2c_label_, "activating…");
-    RCLCPP_INFO(node_->get_logger(), "I2C sensors: start requested");
-}
-
-void DashboardPanel::onI2cStopClicked()
-{
-    if (!i2c_stop_cli_->service_is_ready()) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "I2C stop requested but the service is unavailable "
-                    "(is robot_manager running on the Jetson?)");
-        return;
-    }
-    i2c_stop_cli_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
-    setStackPending(i2c_indicator_, i2c_label_, "deactivating…");
-    RCLCPP_INFO(node_->get_logger(), "I2C sensors: stop requested");
-}
-
-void DashboardPanel::onI2cStatusUpdated(const QString& status)
-{
-    i2c_label_->setText(status);
-    const QString s = status.section(' ', 0, 0);
-
-    QString color = "#888";
-    if (s == "active")           color = "#33cc33";
-    else if (s == "activating")  color = "#ccaa00";
-    else if (s == "partial")     color = "#ccaa00";
-    else if (s == "failed")      color = "#cc3333";
-    i2c_indicator_->setStyleSheet(QString("color: %1; font-size: 14px;").arg(color));
-    i2c_label_->setStyleSheet(QString("color: %1; font-size: 12px;").arg(color));
-
-    const bool active = (s == "active");
-    i2c_start_btn_->setEnabled(!active && s != "activating");
-    i2c_stop_btn_->setEnabled(s != "inactive");
-    // The per-sensor enable toggles only do anything while the driver is running.
-    thermal_toggle_->setEnabled(active);
-    mag_toggle_->setEnabled(active);
-}
-
-// ── Mapping/SLAM stack (robot_manager 'mapping') ─────────────────────────────
-void DashboardPanel::onMappingStartClicked()
-{
-    if (!mapping_start_cli_->service_is_ready()) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "Mapping start requested but the service is unavailable "
-                    "(is robot_manager running on the Jetson?)");
-        return;
-    }
-    mapping_start_cli_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
-    setStackPending(mapping_indicator_, mapping_label_, "activating…");
-    RCLCPP_INFO(node_->get_logger(), "Mapping/SLAM: start requested");
-}
-
-void DashboardPanel::onMappingStopClicked()
-{
-    if (!mapping_stop_cli_->service_is_ready()) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "Mapping stop requested but the service is unavailable "
-                    "(is robot_manager running on the Jetson?)");
-        return;
-    }
-    mapping_stop_cli_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
-    setStackPending(mapping_indicator_, mapping_label_, "deactivating…");
-    RCLCPP_INFO(node_->get_logger(), "Mapping/SLAM: stop requested");
-}
-
-void DashboardPanel::onMappingStatusUpdated(const QString& status)
-{
-    mapping_label_->setText(status);
-    const QString s = status.section(' ', 0, 0);
-
-    QString color = "#888";
-    if (s == "active")           color = "#33cc33";
-    else if (s == "activating")  color = "#ccaa00";
-    else if (s == "partial")     color = "#ccaa00";
-    else if (s == "failed")      color = "#cc3333";
-    mapping_indicator_->setStyleSheet(QString("color: %1; font-size: 14px;").arg(color));
-    mapping_label_->setStyleSheet(QString("color: %1; font-size: 12px;").arg(color));
-
-    const bool active = (s == "active");
-    mapping_start_btn_->setEnabled(!active && s != "activating");
-    mapping_stop_btn_->setEnabled(s != "inactive");
-}
-
-void DashboardPanel::onOpenMapClicked()
-{
-    // Lazily create the standalone map window; just raise it if it exists.
-    if (!map_window_)
-        map_window_ = new MapWindow(node_, MapWindow::Mode::Map2D);   // top-level
-    map_window_->show();
-    map_window_->raise();
-    map_window_->activateWindow();
-}
-
-void DashboardPanel::onOpen3dMapClicked()
-{
-    if (!map3d_window_)
-        map3d_window_ = new MapWindow(node_, MapWindow::Mode::Map3D);   // top-level
-    map3d_window_->show();
-    map3d_window_->raise();
-    map3d_window_->activateWindow();
-}
-
-// ── 3-D mapping (OctoMap) stack ──────────────────────────────────────────────
-void DashboardPanel::onMapping3dStartClicked()
-{
-    if (!mapping3d_start_cli_->service_is_ready()) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "3D mapping start requested but the service is unavailable "
-                    "(is robot_manager running on the Jetson?)");
-        return;
-    }
-    mapping3d_start_cli_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
-    setStackPending(mapping3d_indicator_, mapping3d_label_, "activating…");
-    RCLCPP_INFO(node_->get_logger(), "3D mapping: start requested");
-}
-
-void DashboardPanel::onMapping3dStopClicked()
-{
-    if (!mapping3d_stop_cli_->service_is_ready()) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "3D mapping stop requested but the service is unavailable "
-                    "(is robot_manager running on the Jetson?)");
-        return;
-    }
-    mapping3d_stop_cli_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
-    setStackPending(mapping3d_indicator_, mapping3d_label_, "deactivating…");
-    RCLCPP_INFO(node_->get_logger(), "3D mapping: stop requested");
-}
-
-void DashboardPanel::onMapping3dStatusUpdated(const QString& status)
-{
-    mapping3d_label_->setText(status);
-    const QString s = status.section(' ', 0, 0);
-
-    QString color = "#888";
-    if (s == "active")           color = "#33cc33";
-    else if (s == "activating")  color = "#ccaa00";
-    else if (s == "partial")     color = "#ccaa00";
-    else if (s == "failed")      color = "#cc3333";
-    mapping3d_indicator_->setStyleSheet(QString("color: %1; font-size: 14px;").arg(color));
-    mapping3d_label_->setStyleSheet(QString("color: %1; font-size: 12px;").arg(color));
-
-    const bool active = (s == "active");
-    mapping3d_start_btn_->setEnabled(!active && s != "activating");
-    mapping3d_stop_btn_->setEnabled(s != "inactive");
-}
-
-void DashboardPanel::stopAllStacks()
-{
-    // Dependents first (3-D + 2-D mapping consume the sensors), then sensors.
-    struct NamedClient {
-        const char* name;
-        const rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr& cli;
-    };
-    const NamedClient stacks[] = {
-        {"mapping3d", mapping3d_stop_cli_},
-        {"mapping",   mapping_stop_cli_},
-        {"i2c",       i2c_stop_cli_},
-        {"sensors",   sensors_stop_cli_},
-    };
-
-    auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
-    std::vector<rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture> futures;
-    for (const auto& s : stacks) {
-        if (s.cli && s.cli->service_is_ready()) {
-            futures.push_back(s.cli->async_send_request(req).future.share());
-            RCLCPP_INFO(node_->get_logger(), "GUI closing: stop '%s' requested", s.name);
-        }
-    }
-    if (futures.empty()) {
-        RCLCPP_INFO(node_->get_logger(),
-                    "GUI closing: no robot_manager stacks reachable to stop");
-        return;
-    }
-    // The ROS spin thread is still running during closeEvent, so it delivers the
-    // requests and completes these futures. Wait a bounded window so the stops
-    // actually go out (and are acked) before the app tears the node down.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    for (auto& f : futures)
-        f.wait_until(deadline);
 }

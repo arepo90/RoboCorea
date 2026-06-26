@@ -18,6 +18,7 @@
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <octomap_msgs/msg/octomap.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
@@ -42,6 +43,13 @@ public:
     // voxel VBO, colored by height, with the robot posed from map->base TF.
     void setOctomapMode(bool on);
 
+    // Initial-pose pick (2-D map mode): when armed, a left click-drag on the map
+    // sets the robot's start pose — click = X/Y, drag = yaw (pitch/roll always 0) —
+    // and publishes it on /initialpose (map frame) for AMCL / slam_toolbox
+    // localization. Camera orbit (left-drag) is suppressed while armed; off by
+    // default. RViz "2D Pose Estimate" behaviour.
+    void setInitialPoseMode(bool on);
+
     // Orientation follow: rotate the model's base by the robot's live attitude
     // (the orientation quaternion of an odometry topic) so the twin shows the
     // real behaviour. Camera control is unaffected. If no odometry arrives the
@@ -50,12 +58,19 @@ public:
     // twin_odom_topic at /zed/zed_node/odom for full roll/pitch/yaw.
     void setFollowOrientation(bool on);
 
+signals:
+    // Live during a drag (preview) and once on release (committed). x/y in the
+    // map frame (m), yaw in degrees.
+    void initialPosePreview(double x, double y, double yaw_deg);
+    void initialPosePicked(double x, double y, double yaw_deg);
+
 protected:
     void initializeGL() override;
     void resizeGL(int w, int h) override;
     void paintGL() override;
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
+    void mouseReleaseEvent(QMouseEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
 
 private:
@@ -212,6 +227,19 @@ private:
     float cam_distance_{1.5f};
     QVector3D cam_target_{0, 0, 0.2f};
     QPoint last_mouse_pos_;
+
+    // Build the same view+projection paintGL uses (for screen→world unprojection).
+    void cameraMatrices(QMatrix4x4& view, QMatrix4x4& projection) const;
+    // Unproject a widget pixel onto the world plane z=plane_z (map frame). Returns
+    // false if the ray is parallel to the plane.
+    bool worldOnPlane(const QPoint& px, float plane_z, QVector3D& out) const;
+
+    // ── Initial-pose pick (2-D map mode) ─────────────────────────────────────
+    bool      initial_pose_mode_{false};
+    bool      picking_{false};
+    QVector3D pick_start_{0, 0, 0};   // map-frame X/Y of the press (= robot position)
+    QVector3D pick_cur_{0, 0, 0};     // map-frame X/Y of the current/release point
+    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initpose_pub_;
 
     QTimer* render_timer_;
 };

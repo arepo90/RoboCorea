@@ -258,11 +258,8 @@ void UrdfViewer::paintGL()
         cam_distance_ * sinf(pitch_r));
     eye += cam_target_;
 
-    QMatrix4x4 view;
-    view.lookAt(eye, cam_target_, QVector3D(0, 0, 1));
-    QMatrix4x4 projection;
-    float aspect = width() > 0 ? float(width()) / height() : 1.0f;
-    projection.perspective(45.0f, aspect, 0.01f, 100.0f);
+    QMatrix4x4 view, projection;
+    cameraMatrices(view, projection);
 
     // Map mode: refresh the robot's map pose + the floor texture (the floor is
     // drawn after FK, once we know the model's lowest point so it sits under it).
@@ -388,10 +385,34 @@ void UrdfViewer::paintGL()
 void UrdfViewer::mousePressEvent(QMouseEvent* e)
 {
     last_mouse_pos_ = e->pos();
+    // Initial-pose pick: left-press in 2-D map mode starts the pose (X/Y).
+    if (initial_pose_mode_ && map_mode_ && !octomap_mode_ && (e->button() == Qt::LeftButton)) {
+        QVector3D w;
+        if (worldOnPlane(e->pos(), map_floor_z_, w)) {
+            pick_start_ = w;
+            pick_cur_ = w;
+            picking_ = true;
+            emit initialPosePreview(w.x(), w.y(), 0.0);
+        }
+        return;
+    }
 }
 
 void UrdfViewer::mouseMoveEvent(QMouseEvent* e)
 {
+    // Initial-pose pick: dragging sets yaw from the press point toward the cursor.
+    if (picking_) {
+        QVector3D w;
+        if (worldOnPlane(e->pos(), map_floor_z_, w)) {
+            pick_cur_ = w;
+            double yaw = std::atan2(pick_cur_.y() - pick_start_.y(),
+                                    pick_cur_.x() - pick_start_.x());
+            emit initialPosePreview(pick_start_.x(), pick_start_.y(),
+                                    qRadiansToDegrees(yaw));
+        }
+        return;
+    }
+
     QPoint delta = e->pos() - last_mouse_pos_;
     if (e->buttons() & Qt::LeftButton) {
         cam_yaw_ -= delta.x() * 0.4f;
@@ -406,6 +427,85 @@ void UrdfViewer::mouseMoveEvent(QMouseEvent* e)
     }
     last_mouse_pos_ = e->pos();
     update();
+}
+
+void UrdfViewer::mouseReleaseEvent(QMouseEvent* e)
+{
+    if (!picking_ || e->button() != Qt::LeftButton) return;
+    picking_ = false;
+
+    const double yaw = std::atan2(pick_cur_.y() - pick_start_.y(),
+                                  pick_cur_.x() - pick_start_.x());
+    if (initpose_pub_) {
+        geometry_msgs::msg::PoseWithCovarianceStamped msg;
+        msg.header.frame_id = "map";
+        msg.header.stamp = node_->now();
+        msg.pose.pose.position.x = pick_start_.x();
+        msg.pose.pose.position.y = pick_start_.y();
+        msg.pose.pose.position.z = 0.0;
+        msg.pose.pose.orientation.z = std::sin(yaw * 0.5);   // yaw-only (roll/pitch=0)
+        msg.pose.pose.orientation.w = std::cos(yaw * 0.5);
+        // AMCL-style default covariance (x, y, yaw); rest left at 0.
+        msg.pose.covariance[0] = 0.25;     // x
+        msg.pose.covariance[7] = 0.25;     // y
+        msg.pose.covariance[35] = 0.06853; // yaw
+        initpose_pub_->publish(msg);
+    }
+    emit initialPosePicked(pick_start_.x(), pick_start_.y(), qRadiansToDegrees(yaw));
+}
+
+void UrdfViewer::setInitialPoseMode(bool on)
+{
+    initial_pose_mode_ = on;
+    picking_ = false;
+    if (on && !initpose_pub_) {
+        initpose_pub_ = node_->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
+            "/initialpose", rclcpp::QoS(1).reliable());
+    }
+    setCursor(on ? Qt::CrossCursor : Qt::ArrowCursor);
+}
+
+void UrdfViewer::cameraMatrices(QMatrix4x4& view, QMatrix4x4& projection) const
+{
+    float yaw_r = qDegreesToRadians(cam_yaw_);
+    float pitch_r = qDegreesToRadians(cam_pitch_);
+    QVector3D eye(
+        cam_distance_ * cosf(pitch_r) * cosf(yaw_r),
+        cam_distance_ * cosf(pitch_r) * sinf(yaw_r),
+        cam_distance_ * sinf(pitch_r));
+    eye += cam_target_;
+    view.setToIdentity();
+    view.lookAt(eye, cam_target_, QVector3D(0, 0, 1));
+    projection.setToIdentity();
+    float aspect = width() > 0 ? float(width()) / height() : 1.0f;
+    projection.perspective(45.0f, aspect, 0.01f, 100.0f);
+}
+
+bool UrdfViewer::worldOnPlane(const QPoint& px, float plane_z, QVector3D& out) const
+{
+    QMatrix4x4 view, projection;
+    cameraMatrices(view, projection);
+    bool ok = false;
+    QMatrix4x4 inv = (projection * view).inverted(&ok);
+    if (!ok) return false;
+
+    const float w = width() > 0 ? float(width()) : 1.0f;
+    const float h = height() > 0 ? float(height()) : 1.0f;
+    const float xn = 2.0f * px.x() / w - 1.0f;
+    const float yn = 1.0f - 2.0f * px.y() / h;   // widget Y is top-down
+
+    QVector4D near_c = inv * QVector4D(xn, yn, -1.0f, 1.0f);
+    QVector4D far_c  = inv * QVector4D(xn, yn,  1.0f, 1.0f);
+    if (qFuzzyIsNull(near_c.w()) || qFuzzyIsNull(far_c.w())) return false;
+    QVector3D p0 = near_c.toVector3DAffine();
+    QVector3D p1 = far_c.toVector3DAffine();
+
+    QVector3D dir = p1 - p0;
+    if (qFuzzyIsNull(dir.z())) return false;     // ray parallel to the ground plane
+    float t = (plane_z - p0.z()) / dir.z();
+    if (t < 0.0f) return false;                  // intersection behind the camera
+    out = p0 + dir * t;
+    return true;
 }
 
 void UrdfViewer::wheelEvent(QWheelEvent* e)

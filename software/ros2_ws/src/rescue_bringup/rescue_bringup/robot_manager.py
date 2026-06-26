@@ -48,6 +48,10 @@ DEFAULT_STACKS = {
     'i2c': ('jetson-sensors.service', ['jetson-sensors.service']),
     'mapping': ('rescue-mapping.service', ['rescue-mapping.service']),
     'mapping3d': ('rescue-mapping3d.service', ['rescue-mapping3d.service']),
+    # 2-D localization on a saved map. Normally (re)started by map_manager on a
+    # GUI map-load (it writes the active-map env first); robot_manager just gives
+    # the GUI status + a stop, and includes it in the GUI's stop-on-close sweep.
+    'localization': ('rescue-localization.service', ['rescue-localization.service']),
 }
 
 
@@ -64,7 +68,8 @@ class RobotManager(Node):
     def __init__(self):
         super().__init__('robot_manager')
 
-        self.declare_parameter('stacks', ['sensors', 'i2c', 'mapping', 'mapping3d'])
+        self.declare_parameter(
+            'stacks', ['sensors', 'i2c', 'mapping', 'mapping3d', 'localization'])
         self.declare_parameter('status_period', 0.5)   # 2 Hz: snappier GUI labels
         names = list(self.get_parameter('stacks').value)
         period = float(self.get_parameter('status_period').value)

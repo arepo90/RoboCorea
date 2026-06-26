@@ -1,0 +1,16 @@
+[Unit]
+Description=RoboCorea map manager (named 2-D/3-D map save/load service for the GUI)
+# Always-on controller: owns the named map library under ~/maps and exposes
+# /robot/maps/{save,list,load,delete}. Must stay up to receive GUI requests, so
+# it is NOT PartOf any stack target.
+
+[Service]
+# Must match the workstation/GUI domain.
+Environment=ROS_DOMAIN_ID=20
+# Adjust the workspace path if yours differs (%h is $HOME).
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 run rescue_bringup map_manager'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

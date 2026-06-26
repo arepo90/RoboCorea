@@ -68,6 +68,10 @@ set(GUI_SOURCES
   src/settings_dialog.cpp
   src/ppm_calib_dialog.cpp
   src/map_window.cpp
+  src/systems_window.cpp
+  src/perception_panel.cpp
+  src/maps_panel.cpp
+  src/routine_programmer.cpp
   src/filters.cpp
   # Headers listed so AUTOMOC processes the Q_OBJECT classes.
   include/gui/main_window.hpp
@@ -83,6 +87,10 @@ set(GUI_SOURCES
   include/gui/settings_dialog.hpp
   include/gui/ppm_calib_dialog.hpp
   include/gui/map_window.hpp
+  include/gui/systems_window.hpp
+  include/gui/perception_panel.hpp
+  include/gui/maps_panel.hpp
+  include/gui/routine_programmer.hpp
 )
 if(GST_FOUND)
   list(APPEND GUI_SOURCES src/gst_av_stream.cpp)

@@ -24,9 +24,15 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Vector3.h>
 
+#include <rescue_interfaces/srv/save_map.hpp>
+#include <rescue_interfaces/srv/load_map.hpp>
+
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <memory>
+#include <string>
 #include <unordered_set>
 
 class OctomapNode : public rclcpp::Node {
@@ -68,6 +74,27 @@ public:
         pub_timer_ = create_wall_timer(
             std::chrono::duration<double>(publish_period_),
             [this]() { publishOctree(); });
+
+        // Named-map save/load. The octree (with the octomap lib) is written/read
+        // here as <maps_dir>/<name>/map3d.bt; map_manager forwards the GUI's
+        // /robot/maps/{save,load} 3-D requests to these. Service callbacks run on
+        // the same single-threaded executor as onCloud(), so tree_ access is
+        // serialized (no extra locking needed).
+        const char* home = std::getenv("HOME");
+        maps_dir_ = declare_parameter<std::string>(
+            "maps_dir", std::string(home ? home : ".") + "/maps");
+        save_srv_ = create_service<rescue_interfaces::srv::SaveMap>(
+            "/robot/map3d/save",
+            [this](const std::shared_ptr<rescue_interfaces::srv::SaveMap::Request> req,
+                   std::shared_ptr<rescue_interfaces::srv::SaveMap::Response> resp) {
+                onSaveMap(req, resp);
+            });
+        load_srv_ = create_service<rescue_interfaces::srv::LoadMap>(
+            "/robot/map3d/load",
+            [this](const std::shared_ptr<rescue_interfaces::srv::LoadMap::Request> req,
+                   std::shared_ptr<rescue_interfaces::srv::LoadMap::Response> resp) {
+                onLoadMap(req, resp);
+            });
 
         RCLCPP_INFO(get_logger(),
             "octomap_node: cloud=%s target=%s res=%.2fm leaf=%.2fm range=[%.1f,%.1f] "
@@ -152,6 +179,62 @@ private:
         octree_pub_->publish(msg);
     }
 
+    std::string map3dPath(const std::string& name) const
+    {
+        return maps_dir_ + "/" + name + "/map3d.bt";
+    }
+
+    void onSaveMap(const std::shared_ptr<rescue_interfaces::srv::SaveMap::Request> req,
+                   std::shared_ptr<rescue_interfaces::srv::SaveMap::Response> resp)
+    {
+        if (req->name.empty()) {
+            resp->success = false;
+            resp->message = "empty map name";
+            return;
+        }
+        if (tree_->size() == 0) {
+            resp->success = false;
+            resp->message = "octree is empty — nothing to save (is 3-D mapping running?)";
+            return;
+        }
+        const std::string path = map3dPath(req->name);
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+        if (!tree_->writeBinary(path)) {
+            resp->success = false;
+            resp->message = "octree writeBinary failed: " + path;
+            RCLCPP_ERROR(get_logger(), "%s", resp->message.c_str());
+            return;
+        }
+        resp->success = true;
+        resp->path = path;
+        resp->message = "saved 3-D octree (" + std::to_string(tree_->size()) + " nodes) to " + path;
+        RCLCPP_INFO(get_logger(), "%s", resp->message.c_str());
+    }
+
+    void onLoadMap(const std::shared_ptr<rescue_interfaces::srv::LoadMap::Request> req,
+                   std::shared_ptr<rescue_interfaces::srv::LoadMap::Response> resp)
+    {
+        const std::string path = map3dPath(req->name);
+        if (!std::filesystem::exists(path)) {
+            resp->success = false;
+            resp->message = "no 3-D map at " + path;
+            return;
+        }
+        auto loaded = std::make_unique<octomap::OcTree>(resolution_);
+        if (!loaded->readBinary(path)) {
+            resp->success = false;
+            resp->message = "octree readBinary failed: " + path;
+            RCLCPP_ERROR(get_logger(), "%s", resp->message.c_str());
+            return;
+        }
+        tree_ = std::move(loaded);
+        publishOctree();   // push the loaded map to any live 3-D viewer
+        resp->success = true;
+        resp->message = "loaded 3-D octree (" + std::to_string(tree_->size()) + " nodes) from " + path;
+        RCLCPP_INFO(get_logger(), "%s", resp->message.c_str());
+    }
+
     std::string cloud_topic_, target_frame_;
     double resolution_, leaf_size_, max_range_, min_range_, insert_period_, publish_period_;
     std::unique_ptr<octomap::OcTree> tree_;
@@ -161,6 +244,9 @@ private:
     rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr octree_pub_;
     rclcpp::TimerBase::SharedPtr pub_timer_;
     rclcpp::Time last_insert_{0, 0, RCL_ROS_TIME};
+    std::string maps_dir_;
+    rclcpp::Service<rescue_interfaces::srv::SaveMap>::SharedPtr save_srv_;
+    rclcpp::Service<rescue_interfaces::srv::LoadMap>::SharedPtr load_srv_;
 };
 
 int main(int argc, char** argv)

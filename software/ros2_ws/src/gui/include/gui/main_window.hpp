@@ -18,6 +18,7 @@ class OdometryPanel;
 class DigitalTwinPanel;
 class GstAvStream;
 class SettingsDialog;
+class SystemsWindow;
 class QWidget;
 class QCloseEvent;
 
@@ -54,6 +55,7 @@ private:
     OdometryPanel* odometry_panel_;
     DigitalTwinPanel* digital_twin_panel_;
     SettingsDialog* settings_dialog_{nullptr};
+    SystemsWindow* systems_window_{nullptr};   // created eagerly (hidden); toolbar icon shows it
     std::shared_ptr<CameraHub> camera_hub_;
 
     rclcpp::Publisher<std_msgs::msg::UInt16MultiArray>::SharedPtr ppm_calib_pub_;

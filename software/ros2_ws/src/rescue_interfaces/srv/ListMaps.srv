@@ -1,0 +1,7 @@
+# List every saved map. names[i] corresponds to has_2d[i] / has_3d[i], which
+# report which artifacts exist on disk for that name (a name may have either or
+# both kinds).
+---
+string[] names
+bool[] has_2d
+bool[] has_3d

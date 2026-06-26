@@ -8,6 +8,7 @@
 #include "gui/filter_registry.hpp"
 #include "gui/app_settings.hpp"
 #include "gui/settings_dialog.hpp"
+#include "gui/systems_window.hpp"
 #ifdef HAVE_GSTREAMER
 #include "gui/speech_processor.hpp"
 #include "gui/gst_av_stream.hpp"
@@ -71,6 +72,17 @@ MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget* parent)
     connect(dashboard_panel_, &DashboardPanel::settingsRequested,
             this, &MainWindow::onSettingsRequested);
 
+    // Robot Systems window: perception stacks, the named-map library, and the
+    // autonomous arm routine programmer. Created eagerly (hidden) so its stack
+    // clients/subscriptions are live (and stop-on-close works) and a programmed
+    // routine keeps running even when the window isn't shown.
+    systems_window_ = new SystemsWindow(node_);   // top-level (no parent)
+    connect(dashboard_panel_, &DashboardPanel::systemsRequested, this, [this]() {
+        systems_window_->show();
+        systems_window_->raise();
+        systems_window_->activateWindow();
+    });
+
     // PPM calibration goes to the ESP32 (via the Jetson bridge). Latched so the
     // bridge gets the latest calibration even if it joins after the GUI.
     auto cfg_qos = rclcpp::QoS(1).reliable().transient_local();
@@ -101,6 +113,9 @@ MainWindow::~MainWindow()
     // are torn down, so no audio callback fires into a dead SpeechProcessor.
     av_streams_.clear();
 #endif
+    // Top-level, parentless window — delete explicitly (after the ROS spin thread
+    // has stopped, so no callback fires into its destroyed subscriptions).
+    delete systems_window_;
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
@@ -109,8 +124,8 @@ void MainWindow::closeEvent(QCloseEvent* event)
     // i2c, 2-D + 3-D mapping) via robot_manager, so nothing is left running on
     // the Jetson. Best-effort + bounded: the spin thread is still alive here, so
     // the requests get delivered; if robot_manager is unreachable it's a no-op.
-    if (dashboard_panel_)
-        dashboard_panel_->stopAllStacks();
+    if (systems_window_)
+        systems_window_->stopAllStacks();
     QMainWindow::closeEvent(event);
 }
 

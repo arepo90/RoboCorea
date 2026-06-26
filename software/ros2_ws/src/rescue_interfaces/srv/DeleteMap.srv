@@ -1,0 +1,5 @@
+# Remove a saved map (all artifacts: 2D grid/posegraph + 3D tree) by name.
+string name
+---
+bool success
+string message

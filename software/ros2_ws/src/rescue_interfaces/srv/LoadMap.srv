@@ -1,0 +1,11 @@
+# Load a saved map and start localizing against it (robot-side). `kind`:
+#   "2d"   -> start the localization stack (AMCL + map_server) on the 2D map
+#   "3d"   -> reload the OctoMap binary tree into the 3D mapping node
+#   "both" -> do both (they share the same map frame, so one /initialpose covers both)
+# After loading, set the robot's start pose with /initialpose (the GUI publishes
+# it from a click-drag on the map).
+string name
+string kind                  # "2d" | "3d" | "both"
+---
+bool success
+string message

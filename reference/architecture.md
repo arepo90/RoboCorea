@@ -639,7 +639,12 @@ both are visible at once under the twin.)
 | `VideoPanel` / `VideoWidget` | 2×2 grid of feeds; click-to-enlarge; each widget runs its own filter pipeline on a worker thread and can select any source (incl. thermal). An enlarged cell supports **zoom + pan** (on-screen +/−/Fit buttons or Ctrl+scroll to zoom — trackpad pinch only on Wayland, not X11; two-finger scroll / drag to pan), applied as an ROI crop+upscale of the source frame **before** the filter pipeline (so the CV runs on the zoomed region); resets to fit on collapse. |
 | `FilterRegistry` / `filters` | Self-registering CV filters with a thread-safe `FilterConfig` (atomics). Per-widget instances. |
 | `OdometryPanel` | Track speeds, **track wheel-odometry (x/y/yaw/vx from `/odom/wheel`)**, 4 flipper angles, **per-VESC rows (the six VESC IDs)**, and arm telemetry (ODrive/LKTech/ZE300). |
-| `DashboardPanel` | Connection LED + heartbeat, magnetometer readout (+ enable toggle), **orientation readout from the ZED2 IMU**, **e-stop button**, an **AUTO DRIVE toggle** (autonomy `/cmd_vel` allow/prevent, reflecting `/autonomy/state`; §16), **arm arm/disarm + dexterity/chassis controls**, audio toggle, settings button. |
+| `DashboardPanel` | The always-on operator strip: connection LED + heartbeat, magnetometer readout (+ enable toggle), **thermal-acquisition enable toggle**, **orientation readout from the ZED2 IMU**, **e-stop button**, an **AUTO DRIVE toggle** (autonomy `/cmd_vel` allow/prevent, reflecting `/autonomy/state`; §16), **arm arm/disarm + dexterity/chassis controls**, audio toggle, and the **⚙ settings** + **⊞ Robot Systems** toolbar buttons. (The perception/mapping **stack** controls moved out to `SystemsWindow` to declutter it.) |
+| `SystemsWindow` | Top-level **"Robot Systems"** window (⊞ icon next to ⚙), created eagerly+hidden so its clients/subs stay live and a running routine survives the window being closed. A `QTabWidget`: **Perception** (`PerceptionPanel`), **Maps** (`MapsPanel`), **Arm Program** (`RoutineProgrammer`). Owns `stopAllStacks()` (called from `MainWindow::closeEvent`). |
+| `PerceptionPanel` | The 5 robot_manager stacks — **sensors / i2c / mapping / mapping3d / localization** — each a start/stop + live LED from `/robot/<stack>/status`, plus **Open 2D/3D Map** (→ `MapWindow`). Moved out of the dashboard. |
+| `MapsPanel` | The **named map library** (Maps tab): lists `/robot/maps/list` names with 2D/3D badges + preview thumbnails, **Load** (2D/3D/both → robot-side localization), **Delete**, **Refresh**. Map *data* is robot-owned (`map_manager`); thumbnails mirror to `~/.config/robocorea_gui/map_thumbs/` (like arm poses). |
+| `RoutineProgrammer` | **Block-programmed autonomous arm routines** (Arm Program tab): chain *Go-to-pose / Wait / Gripper open-close / Loop×N / Run-subroutine* blocks into named routines (auto-saved to `~/.config/robocorea_gui/arm_routines.json`). A Qt-thread interpreter (call stack for subroutines, per-frame loop counters) sequences poses on `/servo_node/go_to_pose` + `plan_state==reached`, dwells/gripper on a tick timer; **Start/Pause/Stop** + selectable top-level loop. Gripper steps publish `/gripper` (§13.4). |
+| `MapWindow` / `UrdfViewer` | Live 2-D `/map` or 3-D `/robot/map3d` view (robot at its `map→base` TF). Toolbar: **Set Start Pose** (2-D: click-drag on the map → `/initialpose`, click=X/Y, drag=yaw, roll/pitch 0) and **Save Map…** (grabs a preview thumbnail, calls `/robot/maps/save`). |
 | `DigitalTwinPanel` / `UrdfViewer` | OpenGL 3-D view of the **combined** arm + chassis + flipper URDF, posed from `/joint_states` (arm joints from `servo_node`, flipper joints from `flipper_state`). |
 | `ArmPosePanel` | Saved-pose controls under the twin: a thin client of the `servo_node` save/go/delete/list services with inline per-pose twin thumbnails. Mirrors the pose-name list + selection to `~/.config/robocorea_gui/saved_poses.json` and renders to `pose_thumbs/` so the dropdown is populated at launch before the servo connects (server stays authoritative, §12). |
 | `GstAvStream` | Native-GStreamer receiver for the front C920's **A/V SRT** stream: `srtsrc ! tsdemux` → video appsink (shown via `CameraHub`) + `opusdec ! tee` → speakers **and** an appsink feeding `SpeechProcessor`. Auto-reconnects. |
@@ -748,12 +753,24 @@ links.
 ### Published by `gui`
 
 `/robot/ppm_calib` (reliable + transient-local), `/robot/estop` (republished
-~10 Hz), `/sensors/enable_mask`, and **`/autonomy/enable`** (`Bool`, the autonomy
-allow/prevent toggle in the dashboard). The dashboard also **subscribes** to
-**`/autonomy/state`** (latched) to drive the toggle's checked state, so an RC
-override that the bridge latches off is reflected in the button. (No `/robot/keybind`
-— the RC control scheme is fixed, see §13.2. No `/audio` topic — the C920 audio
-rides SRT and is decoded in the GUI.)
+~10 Hz), `/sensors/enable_mask`, **`/autonomy/enable`** (`Bool`, the autonomy
+allow/prevent toggle in the dashboard), **`/gripper`** (`Float32` rate, from the
+`RoutineProgrammer` gripper blocks; the gamepad also publishes it, §13.4), and
+**`/initialpose`** (`PoseWithCovarianceStamped`, map frame — from a click-drag on
+the 2-D `MapWindow`, consumed by AMCL/slam_toolbox localization). The dashboard
+also **subscribes** to **`/autonomy/state`** (latched) to drive the toggle's
+checked state, so an RC override that the bridge latches off is reflected in the
+button. (No `/robot/keybind` — the RC control scheme is fixed, see §13.2. No
+`/audio` topic — the C920 audio rides SRT and is decoded in the GUI.)
+
+**Robot Systems window services** (the GUI is a client; servers run on the Jetson):
+`map_manager` exposes **`/robot/maps/{save,list,load,delete}`** (`rescue_interfaces`
+`SaveMap`/`ListMaps`/`LoadMap`/`DeleteMap`) — named maps under `~/maps/<name>/`;
+2-D save = `slam_toolbox serialize_map` + `nav2_map_server map_saver_cli`, 3-D
+save/load forwarded to `octomap_node`'s **`/robot/map3d/{save,load}`**, 2-D load
+restarts `rescue-localization.service` on the chosen map. `robot_manager` exposes
+the **`/robot/<stack>/{start,stop,restart}`** + **`/robot/<stack>/status`** set for
+`sensors,i2c,mapping,mapping3d,localization` (`PerceptionPanel`).
 
 ### Arm stack
 
