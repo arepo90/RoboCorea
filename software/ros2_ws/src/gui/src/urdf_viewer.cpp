@@ -33,13 +33,22 @@ in vec3 FragPos;
 in vec3 Normal;
 uniform vec4 objectColor;
 uniform vec3 lightDir;
+uniform vec3 viewPos;       // camera eye (for the rim term)
+uniform float bodyMul;      // base-colour multiplier (1.0 twin, <1 darkens in map)
+uniform float rimStrength;  // 0 in twin; >0 adds a fresnel edge glow in map mode
+uniform vec3 rimColor;
 out vec4 FragColor;
 void main() {
     vec3 norm = normalize(Normal);
     float ambient = 0.35;
     float diff = max(dot(norm, normalize(lightDir)), 0.0);
     float back = max(dot(norm, normalize(-lightDir)), 0.0) * 0.15;
-    vec3 color = (ambient + diff + back) * objectColor.rgb;
+    vec3 color = (ambient + diff + back) * objectColor.rgb * bodyMul;
+    // Rim / fresnel: bright on grazing-angle edges → outlines the robot against
+    // both light and dark map regions.
+    vec3 viewDir = normalize(viewPos - FragPos);
+    float rim = pow(1.0 - max(dot(norm, viewDir), 0.0), 3.0);
+    color += rimStrength * rim * rimColor;
     FragColor = vec4(color, objectColor.a);
 }
 )";
@@ -223,6 +232,8 @@ void UrdfViewer::paintGL()
         shader_->setUniformValue("normalMatrix", identity.normalMatrix());
         shader_->setUniformValue("objectColor", QVector4D(0.4f, 0.4f, 0.4f, 0.25f));
         shader_->setUniformValue("lightDir", QVector3D(0.5f, 0.3f, 1.0f));
+        shader_->setUniformValue("bodyMul", 1.0f);     // keep grid at full colour
+        shader_->setUniformValue("rimStrength", 0.0f);
         glBindVertexArray(grid_vao_);
         glDrawArrays(GL_LINES, 0, grid_vertex_count_);
         shader_->release();
@@ -293,6 +304,12 @@ void UrdfViewer::paintGL()
     shader_->setUniformValue("view", view);
     shader_->setUniformValue("projection", projection);
     shader_->setUniformValue("lightDir", QVector3D(0.5f, 0.3f, 1.0f));
+    shader_->setUniformValue("viewPos", eye);
+    // In map mode: darken the body and add a cyan rim glow so the robot reads
+    // clearly over the grayscale map. Twin mode is unchanged (no rim, full body).
+    shader_->setUniformValue("bodyMul", map_mode_ ? 0.55f : 1.0f);
+    shader_->setUniformValue("rimStrength", map_mode_ ? 1.6f : 0.0f);
+    shader_->setUniformValue("rimColor", QVector3D(0.20f, 0.85f, 1.0f));
 
     for (auto& [name, ld] : links_) {
         for (auto& obj : ld.visuals) {
