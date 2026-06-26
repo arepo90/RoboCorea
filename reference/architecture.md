@@ -263,7 +263,7 @@ below are planned:
 
 | Package | Lang | Runs on | Purpose |
 |---------|------|---------|---------|
-| `rescue_interfaces` | msg/srv | both | Shared custom message & service definitions. **(arm saved-pose services implemented: SavePose/GoToPose/DeletePose/ListPoses)** |
+| `rescue_interfaces` | msg/srv | both | Shared custom message & service definitions. **(arm saved-pose services: SavePose/GoToPose/DeletePose/ListPoses; named-map services: SaveMap/ListMaps/LoadMap/DeleteMap)** |
 | `esp32_bridge` | Python | Jetson | Serial binary protocol ⇄ ROS 2 topics. The relay core. **(implemented)** |
 | `jetson_sensors` | Python | Jetson | MLX90640 I2C → `/sensors/thermal` (`Image`) and LIS3MDL I2C → `/sensors/mag` (`MagneticField`). |
 | `dicerox_mapping` | mixed | Jetson | 2D SLAM: `slam_toolbox` + ZED2 planar odom (`zed_planar_odom`) + RPLidar scan reframer (`scan_frame_republisher`). Map save + localization. **(implemented)** |
@@ -273,7 +273,7 @@ below are planned:
 | `arm_description` | URDF/STL | Workstation | **Combined** robot URDF (arm + chassis + 4 flippers) + chassis/flipper meshes, for the digital twin and the arm's body-collision. **(implemented: `dicerox_full.urdf`; MoveIt-specific config still deferred)** |
 | `arm_moveit` | config | Workstation | MoveIt 2 config + Servo + launch. |
 | `arm_teleop` | Python | Workstation | SDLS servo (self- **and** body-collision), saved-pose RRT planning, keyboard/joystick teleop, and `flipper_state` (`/encoders/flipper`→`/joint_states`). The one-shot workstation bring-up now lives in **`gui/bringup.launch.py`** (the operator console owns it). The arm is jogged from the workstation **gamepad** (`joystick_servo`), not the RC. |
-| `rescue_bringup` | launch | both | Per-host launch files + convenience scripts. |
+| `rescue_bringup` | launch/py | both | Per-host launch + systemd units + two always-on Jetson nodes: **`robot_manager`** (start/stop/status for the sensors/i2c/mapping/mapping3d/localization stacks) and **`map_manager`** (named map library `/robot/maps/*`; drives `rescue-localization.service`). |
 
 (Names are proposals; the legacy equivalents are `esp32_bridge`, `gui`,
 `jaguar_*` for the arm. Keep names robot-neutral here.)
@@ -576,6 +576,16 @@ hardware and the operator network. Planned nodes:
   drive path (§9.2). The two competition entry points are `real_mapping.launch.py`
   (unknown arena) and `real_navigation.launch.py` (known map, AMCL by default) —
   see `rescue_nav/docs/COMPETITION_WORKFLOWS.md`. Still 2D only (no elevation map).
+
+- **`robot_manager` + `map_manager`** (`rescue_bringup`, Python, always-on).
+  `robot_manager` starts/stops the perception **stacks** via `systemctl --user`
+  and reports `/robot/<stack>/status` (sensors, i2c, mapping, mapping3d,
+  localization), so the GUI's **Robot Systems → Perception** tab is just a thin
+  client (no SSH, no orphaned nodes). `map_manager` owns the **named map library**
+  under `~/maps/<name>/`: `/robot/maps/{save,list,load,delete}` — 2-D save via
+  `slam_toolbox serialize_map` + `map_saver_cli`, 3-D via `octomap_node`'s
+  `/robot/map3d/{save,load}`, and *load* = write the active-map env + (re)start
+  `rescue-localization.service`. See `rescue_bringup/systemd/README.md`.
 
 The Jetson does **not** handle the RF cameras (they go straight to the
 workstation) and does **not** run the GUI or arm IK.
