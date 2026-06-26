@@ -5,13 +5,19 @@ only the compressed binary octree on /robot/map3d (latched, low-rate). The raw
 cloud never leaves the robot. Requires the sensors + 2-D mapping stacks already
 running (the ZED cloud and the map->odom->base_footprint TF tree).
 
-TF note: the mapping_ekf tree ends at base_footprint (no base_link), but the ZED
-roots its camera frames at base_link, so map<-zed_*_frame can't resolve and the
-octree stays empty. We publish a static base_footprint->base_link here to join
-the two. Set base_link_z to the base_link height above the ground (base_footprint)
-for correct absolute height; 0.0 still connects the tree (self-consistent with the
-URDF, which is also placed at base_footprint). Disable with publish_base_link:=false
-if your stack already publishes base_footprint->base_link.
+TF note: the mapping_ekf tree ends at base_footprint. The ZED's camera frames are
+their own subtree rooted at zed_camera_link (published by the ZED state publisher
+on the Jetson; the robot URDF that would mount them lives on the laptop). To let
+octomap_node transform the cloud into `map`, we graft the ZED subtree onto the map
+tree with a single static base_footprint->zed_camera_link mount.
+
+IMPORTANT — do NOT route this through `base_link`: the digital-twin URDF
+(robot_state_publisher on the workstation) already publishes world_link->base_link
+continuously, so a frame can only have one parent and any base_footprint->base_link
+static we publish loses that conflict — stranding the ZED subtree under world_link,
+unreachable from `map` (the octree then never grows). Parenting zed_camera_link
+directly under base_footprint sidesteps the twin entirely. Set zed_mount_z to the
+camera height above base_footprint (ground) for correct absolute height.
 """
 
 import os
@@ -27,48 +33,36 @@ from launch_ros.actions import Node
 def generate_launch_description():
     cfg = os.path.join(
         get_package_share_directory('rescue_mapping3d'), 'config', 'octomap.yaml')
-    base_link_z = LaunchConfiguration('base_link_z')
     zed_frame = LaunchConfiguration('zed_mount_frame')
+    zed_parent = LaunchConfiguration('zed_parent_frame')
     return LaunchDescription([
         DeclareLaunchArgument('params_file', default_value=cfg),
-        DeclareLaunchArgument('publish_base_link', default_value='true',
-                              description='Publish a static base_footprint->base_link '
-                                          '(joins base_link to the map tree).'),
-        DeclareLaunchArgument('base_link_z', default_value='0.0',
-                              description='base_link height above base_footprint (m).'),
-        # The ZED camera frames are their own tree on the Jetson (the robot URDF
-        # that mounts them is published by robot_state_publisher on the laptop).
-        # Publish the mount here so base_link reaches the ZED frames. Set the
-        # offsets to the real camera position on the robot; confirm the child
-        # frame name from `tf2_monitor` / the cloud's header.frame_id chain.
+        # The ZED camera frames are their own subtree on the Jetson (root =
+        # zed_camera_link). Graft it onto the MAP tree at base_footprint so
+        # octomap_node can transform the cloud into `map`. base_footprint (NOT
+        # base_link) is deliberate — base_link is owned by the twin URDF on the
+        # laptop (world_link->base_link) and would win the parent conflict.
         DeclareLaunchArgument('publish_zed_mount', default_value='true',
-                              description='Publish a static base_link->ZED-camera mount.'),
+                              description='Publish a static <zed_parent_frame>->ZED-camera mount.'),
+        DeclareLaunchArgument('zed_parent_frame', default_value='base_footprint',
+                              description='Map-tree frame to parent the ZED subtree under.'),
         DeclareLaunchArgument('zed_mount_frame', default_value='zed_camera_link',
-                              description='ZED tree root frame to parent under base_link.'),
+                              description='ZED subtree root frame to parent under zed_parent_frame.'),
         DeclareLaunchArgument('zed_mount_x', default_value='0.20'),
         DeclareLaunchArgument('zed_mount_y', default_value='0.0'),
-        DeclareLaunchArgument('zed_mount_z', default_value='0.30'),
+        DeclareLaunchArgument('zed_mount_z', default_value='0.30',
+                              description='Camera height above base_footprint (ground), m.'),
 
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
-            name='base_footprint_to_base_link',
-            output='screen',
-            condition=IfCondition(LaunchConfiguration('publish_base_link')),
-            arguments=['--x', '0', '--y', '0', '--z', base_link_z,
-                       '--frame-id', 'base_footprint', '--child-frame-id', 'base_link'],
-        ),
-
-        Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='base_link_to_zed',
+            name='base_footprint_to_zed',
             output='screen',
             condition=IfCondition(LaunchConfiguration('publish_zed_mount')),
             arguments=['--x', LaunchConfiguration('zed_mount_x'),
                        '--y', LaunchConfiguration('zed_mount_y'),
                        '--z', LaunchConfiguration('zed_mount_z'),
-                       '--frame-id', 'base_link', '--child-frame-id', zed_frame],
+                       '--frame-id', zed_parent, '--child-frame-id', zed_frame],
         ),
 
         Node(
