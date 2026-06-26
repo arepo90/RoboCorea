@@ -22,7 +22,8 @@ target and reports the state — so the GUI gets one-click control with no orpha
 | `rescue-sensors.target` | Group: start/stop/restart it to control **both** drivers. |
 | `jetson-sensors.service` | I2C sensors (MLX90640 thermal + LIS3MDL mag), one process owning the shared bus. On-demand (no `[Install]`). |
 | `rescue-mapping.service` | SLAM + EKF (`mapping_ekf.launch.py`, `use_rviz:=false`) — runs on the robot; the workstation only views `/map` over DDS. On-demand; needs the sensor stack up. |
-| `robot-manager.service` | Always-on node managing **stacks**: exposes `/robot/<stack>/{start,stop,restart}` + `/robot/<stack>/status` for `sensors` (ZED+lidar), `i2c` (thermal+mag) and `mapping` (SLAM+EKF). |
+| `rescue-mapping3d.service` | 3-D OctoMap (`rescue_mapping3d`) — builds an octree from the ZED cloud + TF on the robot; publishes only the compressed binary octree on `/robot/map3d` (latched, ~1 Hz). The raw cloud never leaves the Jetson. On-demand; needs sensors + mapping up. |
+| `robot-manager.service` | Always-on node managing **stacks**: exposes `/robot/<stack>/{start,stop,restart}` + `/robot/<stack>/status` for `sensors` (ZED+lidar), `i2c` (thermal+mag), `mapping` (SLAM+EKF) and `mapping3d` (OctoMap). |
 
 Before deploying, check the marked lines in each unit:
 - `Environment=ROS_DOMAIN_ID=20` — must match the workstation/GUI.

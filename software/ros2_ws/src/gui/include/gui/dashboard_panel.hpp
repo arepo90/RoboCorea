@@ -65,6 +65,8 @@ signals:
     void i2cStatusUpdated(const QString& status);
     // Mapping/SLAM stack lifecycle (slam_toolbox + EKF on the Jetson).
     void mappingStatusUpdated(const QString& status);
+    // 3-D mapping (OctoMap) stack lifecycle.
+    void mapping3dStatusUpdated(const QString& status);
 
 public slots:
     // Called by VideoPanel when any widget selects/deselects the thermal source.
@@ -105,6 +107,11 @@ private slots:
     void onMappingStartClicked();
     void onMappingStopClicked();
     void onOpenMapClicked();
+    // 3-D mapping (OctoMap)
+    void onMapping3dStatusUpdated(const QString& status);
+    void onMapping3dStartClicked();
+    void onMapping3dStopClicked();
+    void onOpen3dMapClicked();
 
 private:
     void setConnState(const QString& color, const QString& label);
@@ -217,4 +224,15 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mapping_status_sub_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping_start_cli_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping_stop_cli_;
+
+    // ── 3-D mapping (OctoMap) stack ──────────────────────────────────────────
+    QLabel*      mapping3d_indicator_{nullptr};
+    QLabel*      mapping3d_label_{nullptr};
+    QPushButton* mapping3d_start_btn_{nullptr};
+    QPushButton* mapping3d_stop_btn_{nullptr};
+    QPushButton* open_3dmap_btn_{nullptr};
+    QWidget*     map3d_window_{nullptr};     // 3-D MapWindow (created lazily)
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mapping3d_status_sub_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping3d_start_cli_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping3d_stop_cli_;
 };

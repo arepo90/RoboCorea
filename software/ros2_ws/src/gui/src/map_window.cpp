@@ -3,18 +3,20 @@
 
 #include <QVBoxLayout>
 
-MapWindow::MapWindow(rclcpp::Node::SharedPtr node, QWidget* parent)
+MapWindow::MapWindow(rclcpp::Node::SharedPtr node, Mode mode, QWidget* parent)
     : QWidget(parent)
 {
-    setWindowTitle("RoboCorea — Map");
+    setWindowTitle(mode == Mode::Map3D ? "RoboCorea - 3D Map"
+                                       : "RoboCorea - Map");
     resize(900, 800);
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
-    // Reuse the URDF renderer in map mode: textured /map floor + robot at its
-    // map->base_footprint pose, posed from /joint_states like the digital twin.
     viewer_ = new UrdfViewer(node, this);
-    viewer_->setMapMode(true);
+    if (mode == Mode::Map3D)
+        viewer_->setOctomapMode(true);
+    else
+        viewer_->setMapMode(true);
     layout->addWidget(viewer_);
 }

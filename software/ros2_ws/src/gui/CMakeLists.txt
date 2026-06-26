@@ -18,6 +18,8 @@ find_package(std_srvs REQUIRED)                             # arm lifecycle Trig
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(octomap_msgs REQUIRED)
+find_package(octomap REQUIRED)
 find_package(tf2 REQUIRED)                                   # map window: robot pose
 find_package(tf2_ros REQUIRED)                              # map window: TF listener
 find_package(rescue_interfaces REQUIRED)                     # saved-pose services
@@ -94,6 +96,7 @@ target_include_directories(gui PUBLIC
   ${VOSK_INCLUDE_DIR}
   ${ASSIMP_INCLUDE_DIRS}
   ${ONNXRUNTIME_INCLUDE_DIR}
+  ${OCTOMAP_INCLUDE_DIRS}
 )
 
 target_compile_features(gui PUBLIC cxx_std_17)
@@ -107,6 +110,7 @@ target_link_libraries(gui
   ${ASSIMP_LIBRARIES}
   ${ONNXRUNTIME_LIB}
   ${ZBAR_LIB}
+  ${OCTOMAP_LIBRARIES}
 )
 
 if(GST_FOUND)
@@ -128,6 +132,7 @@ ament_target_dependencies(gui
   sensor_msgs
   geometry_msgs
   nav_msgs
+  octomap_msgs
   tf2
   tf2_ros
   rescue_interfaces

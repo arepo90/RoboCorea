@@ -17,6 +17,7 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <octomap_msgs/msg/octomap.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
@@ -36,6 +37,10 @@ public:
     // place the robot at its map->base_footprint pose (from TF), instead of the
     // plain twin grid at the origin. Off by default (digital-twin behaviour).
     void setMapMode(bool on);
+
+    // 3-D map mode: render /robot/map3d occupied OctoMap leaves as a single
+    // voxel VBO, colored by height, with the robot posed from map->base TF.
+    void setOctomapMode(bool on);
 
     // Orientation follow: rotate the model's base by the robot's live attitude
     // (the orientation quaternion of an odometry topic) so the twin shows the
@@ -58,6 +63,12 @@ private:
     struct Vertex {
         float pos[3];
         float normal[3];
+    };
+
+    struct VoxelVertex {
+        float pos[3];
+        float normal[3];
+        float color[4];
     };
 
     // Geometry description (parsed from URDF, no GL resources)
@@ -124,6 +135,7 @@ private:
     void buildFloorTexture();   // GL thread: (re)upload the floor texture + quad
     void drawFloor(const QMatrix4x4& view, const QMatrix4x4& projection);
     void pollBaseTransform();   // sets base_transform_ from map->base TF
+    void ensureMapTfListener();
 
     bool map_mode_{false};
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
@@ -144,6 +156,23 @@ private:
     QMatrix4x4 base_transform_; // map->base (identity until the first TF arrives)
     bool have_base_{false};
     float map_floor_z_{-0.15f}; // floor quad z in the map frame (under the model)
+
+    // ── 3-D map mode: occupied OctoMap leaves as colored voxels ──────────────
+    void onOctomap(const octomap_msgs::msg::Octomap::SharedPtr msg);  // ROS thread
+    void buildVoxelBuffer();  // GL thread: upload pending voxel vertices
+    void drawVoxels(const QMatrix4x4& view, const QMatrix4x4& projection,
+                    const QVector3D& eye);
+
+    bool octomap_mode_{false};
+    rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
+    QOpenGLShaderProgram* voxel_shader_{nullptr};
+    GLuint voxel_vao_{0}, voxel_vbo_{0};
+    int voxel_vertex_count_{0};
+
+    std::mutex voxel_mutex_;
+    std::vector<VoxelVertex> pending_voxels_;
+    bool voxels_dirty_{false};
+    bool have_voxels_{false};
 
     // ── Orientation follow (twin attitude from an odometry topic) ────────────
     void onOdom(const nav_msgs::msg::Odometry::SharedPtr msg);  // ROS thread
