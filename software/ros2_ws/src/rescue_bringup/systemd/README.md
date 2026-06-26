@@ -21,7 +21,7 @@ target and reports the state — so the GUI gets one-click control with no orpha
 | `lidar.service` | RPLidar driver on the stable `/dev/rplidar`. `PartOf` the target. |
 | `rescue-sensors.target` | Group: start/stop/restart it to control **both** drivers. |
 | `jetson-sensors.service` | I2C sensors (MLX90640 thermal + LIS3MDL mag), one process owning the shared bus. On-demand (no `[Install]`). |
-| `rescue-mapping.service` | SLAM + EKF (`mapping_ekf.launch.py`, `use_rviz:=false`) — runs on the robot; the workstation only views `/map` over DDS. On-demand; needs the sensor stack up. |
+| `rescue-mapping.service` | SLAM + odometry (`mapping_ekf.launch.py`, `use_rviz:=false`) — runs on the robot; the workstation only views `/map` over DDS. On-demand; needs the sensor stack up. Odometry source is switchable (EKF vs ZED-direct) via `ROBOCOREA_USE_EKF` — see [Odometry mode](#odometry-mode-prod-vs-bench). |
 | `rescue-mapping3d.service` | 3-D OctoMap (`rescue_mapping3d`) — builds an octree from the ZED cloud + TF on the robot; publishes only the compressed binary octree on `/robot/map3d` (latched, ~1 Hz). The raw cloud never leaves the Jetson. On-demand; needs sensors + mapping up. |
 | `robot-manager.service` | Always-on node managing **stacks**: exposes `/robot/<stack>/{start,stop,restart}` + `/robot/<stack>/status` for `sensors` (ZED+lidar), `i2c` (thermal+mag), `mapping` (SLAM+EKF) and `mapping3d` (OctoMap). |
 
@@ -32,6 +32,25 @@ Before deploying, check the marked lines in each unit:
 
 `/dev/rplidar` is the stable symlink from the RPLidar udev rule:
 `sudo cp src/sllidar_ros2/scripts/rplidar.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger`
+
+## Odometry mode (prod vs bench)
+
+`rescue-mapping.service` chooses what owns `odom -> base_footprint`, via the
+`ROBOCOREA_USE_EKF` env var on the **user** systemd manager (default = prod):
+
+| Mode | `ROBOCOREA_USE_EKF` | Owner of `odom->base_footprint` | When |
+|------|---------------------|---------------------------------|------|
+| **prod** (default) | unset / `true` | `robot_localization` EKF (wheel `vx` + ZED VIO + ZED IMU) | Real robot: tracks driving, bridge up, ZED rigidly mounted. |
+| **bench** | `false` | `zed_planar_odom` (planar ZED VIO directly) | No tracks/bridge, or hand-moving the ZED. The planar ground-robot EKF mis-models that and adds jank; the ZED odom is already visual-**inertial** so the IMU isn't lost. |
+
+```bash
+# switch to bench (ZED-direct), then restart from the GUI (Stop SLAM -> Start SLAM)
+systemctl --user set-environment ROBOCOREA_USE_EKF=false
+# back to prod (EKF)
+systemctl --user unset-environment ROBOCOREA_USE_EKF
+```
+The env var is read at unit **start**, so set it *before* (re)starting the stack.
+`robot_manager` / the GUI Start-SLAM button pick it up automatically — no unit edit.
 
 ## Deploy (on the robot / Jetson)
 

@@ -9,8 +9,15 @@ Description=RoboCorea SLAM + EKF (mapping_ekf: slam_toolbox + robot_localization
 # Must match the workstation/GUI domain.
 Environment=ROS_DOMAIN_ID=20
 # use_rviz:=false — the Jetson is headless; RViz runs on the workstation.
+# use_ekf — odometry source: EKF fusion (prod) vs zed_planar_odom direct (bench).
+#   Default is true (prod). To switch to ZED-direct for bench/handheld testing,
+#   set the env var on the user manager, then restart (GUI Stop SLAM -> Start SLAM):
+#     systemctl --user set-environment ROBOCOREA_USE_EKF=false
+#   Revert to prod:
+#     systemctl --user unset-environment ROBOCOREA_USE_EKF
+#   (Don't hardcode it via Environment= here — that would override the toggle.)
 # Adjust the workspace path if yours differs.
-ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch rescue_nav mapping_ekf.launch.py use_rviz:=false'
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch rescue_nav mapping_ekf.launch.py use_rviz:=false use_ekf:=${ROBOCOREA_USE_EKF:-true}'
 KillSignal=SIGINT
 KillMode=control-group
 TimeoutStopSec=15
