@@ -45,6 +45,14 @@ public:
     // MainWindow after the settings dialog applies/resets.
     void applySpeechAudioSettings();
 
+    // Request a stop of every robot_manager-managed stack (mapping3d, mapping,
+    // i2c, sensors — dependents first). Called from MainWindow::closeEvent so
+    // closing the GUI tears the robot's perception stacks down cleanly. Blocks
+    // briefly (best-effort) so the requests are delivered before shutdown; if
+    // robot_manager isn't reachable, the clients simply aren't ready and it's a
+    // no-op.
+    void stopAllStacks();
+
 signals:
     void resetSourcesRequested();
     void settingsRequested();

@@ -13,6 +13,7 @@
 #include "gui/gst_av_stream.hpp"
 #endif
 
+#include <QCloseEvent>
 #include <QFrame>
 #include <QScrollArea>
 #include <QSplitter>
@@ -100,6 +101,17 @@ MainWindow::~MainWindow()
     // are torn down, so no audio callback fires into a dead SpeechProcessor.
     av_streams_.clear();
 #endif
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    // Closing the operator console stops the robot's perception stacks (sensors,
+    // i2c, 2-D + 3-D mapping) via robot_manager, so nothing is left running on
+    // the Jetson. Best-effort + bounded: the spin thread is still alive here, so
+    // the requests get delivered; if robot_manager is unreachable it's a no-op.
+    if (dashboard_panel_)
+        dashboard_panel_->stopAllStacks();
+    QMainWindow::closeEvent(event);
 }
 
 #ifdef HAVE_GSTREAMER

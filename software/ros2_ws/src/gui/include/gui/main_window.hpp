@@ -19,12 +19,18 @@ class DigitalTwinPanel;
 class GstAvStream;
 class SettingsDialog;
 class QWidget;
+class QCloseEvent;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(rclcpp::Node::SharedPtr node, QWidget* parent = nullptr);
     ~MainWindow() override;
+
+protected:
+    // Stop the robot's perception stacks (via the dashboard) before the window
+    // closes, so quitting the GUI leaves nothing running on the Jetson.
+    void closeEvent(QCloseEvent* event) override;
 
 private slots:
     void onSourcesUpdated();

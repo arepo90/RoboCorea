@@ -13,7 +13,9 @@
 #include <QTextEdit>
 #include <QVBoxLayout>
 
+#include <chrono>
 #include <cmath>
+#include <vector>
 
 // Instant amber "pending" feedback on a stack's status LED+label the moment a
 // start/stop is clicked, so the UI responds immediately instead of waiting for
@@ -1104,4 +1106,39 @@ void DashboardPanel::onMapping3dStatusUpdated(const QString& status)
     const bool active = (s == "active");
     mapping3d_start_btn_->setEnabled(!active && s != "activating");
     mapping3d_stop_btn_->setEnabled(s != "inactive");
+}
+
+void DashboardPanel::stopAllStacks()
+{
+    // Dependents first (3-D + 2-D mapping consume the sensors), then sensors.
+    struct NamedClient {
+        const char* name;
+        const rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr& cli;
+    };
+    const NamedClient stacks[] = {
+        {"mapping3d", mapping3d_stop_cli_},
+        {"mapping",   mapping_stop_cli_},
+        {"i2c",       i2c_stop_cli_},
+        {"sensors",   sensors_stop_cli_},
+    };
+
+    auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
+    std::vector<rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture> futures;
+    for (const auto& s : stacks) {
+        if (s.cli && s.cli->service_is_ready()) {
+            futures.push_back(s.cli->async_send_request(req).future.share());
+            RCLCPP_INFO(node_->get_logger(), "GUI closing: stop '%s' requested", s.name);
+        }
+    }
+    if (futures.empty()) {
+        RCLCPP_INFO(node_->get_logger(),
+                    "GUI closing: no robot_manager stacks reachable to stop");
+        return;
+    }
+    // The ROS spin thread is still running during closeEvent, so it delivers the
+    // requests and completes these futures. Wait a bounded window so the stops
+    // actually go out (and are acked) before the app tears the node down.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    for (auto& f : futures)
+        f.wait_until(deadline);
 }
