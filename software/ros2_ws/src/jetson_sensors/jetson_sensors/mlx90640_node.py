@@ -143,11 +143,18 @@ class Mlx90640Node(Node):
                 'publish_rate exceeds refresh_rate; duplicate/stale sensor data may result'
             )
 
-        self.reader = (
-            DummyReader() if use_dummy
-            else Mlx90640Reader(bus, address, refresh_rate)
-        )
+        # Remember how to (re)build the reader so we can retry / self-heal later.
+        self._use_dummy = use_dummy
+        self._bus = bus
+        self._address = address
+        self._refresh_rate = refresh_rate
+        self._last_reader_retry = 0.0
+        self.reader_retry_period = 5.0   # s between lazy re-init attempts
+
         self.filter = ExponentialFilter(alpha)
+        # Advertise the topics FIRST, before touching the sensor, so /sensors/thermal
+        # always exists for the GUI to discover — even if the MLX90640 is flaky at
+        # boot. Frames only flow once it is enabled AND the reader is healthy.
         self.raw_publisher = self.create_publisher(Image, raw_topic, sensor_qos())
         self.filtered_publisher = self.create_publisher(
             Image, filtered_topic, sensor_qos()
@@ -157,6 +164,14 @@ class Mlx90640Node(Node):
             status_topic,
             QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE),
         )
+
+        # The Adafruit MLX90640 constructor reads the whole EEPROM over I2C and can
+        # raise *transiently* on a slow/noisy bus (e.g. "More than 4 outlier
+        # pixels"). Retry a few times; if it still fails, keep the NODE ALIVE (the
+        # topic stays advertised) and re-init lazily in publish_frame so thermal
+        # self-heals instead of the node crashing and the source disappearing.
+        self.reader = self._make_reader(attempts=5)
+
         self.enable_gate = EnableMaskGate(
             self,
             enable_mask_topic,
@@ -176,9 +191,58 @@ class Mlx90640Node(Node):
             'image QoS is best-effort/keep-last(1)'
         )
 
+    def _make_reader(self, attempts: int = 1):
+        """Build the thermal reader, retrying the flaky I2C EEPROM init.
+
+        Returns the reader, or None if every attempt failed (node stays alive).
+        """
+        last_exc = None
+        for i in range(max(1, attempts)):
+            try:
+                reader = (
+                    DummyReader() if self._use_dummy
+                    else Mlx90640Reader(self._bus, self._address, self._refresh_rate)
+                )
+                if i > 0:
+                    self.get_logger().info(f'MLX90640 reader ready on attempt {i + 1}')
+                return reader
+            except Exception as exc:  # noqa: BLE001 - any I2C/driver failure
+                last_exc = exc
+                time.sleep(0.5)
+        self.get_logger().error(
+            f'MLX90640 init failed ({type(last_exc).__name__}: {last_exc}); '
+            '/sensors/thermal advertised but no frames until the sensor recovers'
+        )
+        return None
+
+    def _publish_fault_status(self) -> None:
+        status = ThermalStatus()
+        status.header.stamp = self.get_clock().now().to_msg()
+        status.header.frame_id = self.frame_id
+        status.sequence = self.sequence
+        status.sensor_ok = False
+        status.min_temperature = math.nan
+        status.max_temperature = math.nan
+        status.center_temperature = math.nan
+        status.total_read_errors = self.total_read_errors
+        status.consecutive_read_errors = self.consecutive_read_errors
+        status.acquisition_rate_hz = 0.0
+        self.status_publisher.publish(status)
+
     def publish_frame(self) -> None:
         if not self.enable_gate.enabled:
             return
+        # Sensor init failed earlier (or was dropped after repeated read errors) —
+        # retry building the reader, throttled, so thermal self-heals.
+        if self.reader is None:
+            now = time.monotonic()
+            if now - self._last_reader_retry < self.reader_retry_period:
+                return
+            self._last_reader_retry = now
+            self.reader = self._make_reader(attempts=1)
+            if self.reader is None:
+                self._publish_fault_status()
+                return
         try:
             thermal = self.reader.read()
         except (ValueError, OSError) as exc:
@@ -188,18 +252,11 @@ class Mlx90640Node(Node):
                 self.get_logger().warning(
                     f'Thermal read failed ({self.consecutive_read_errors} consecutive): {exc}'
                 )
-            status = ThermalStatus()
-            status.header.stamp = self.get_clock().now().to_msg()
-            status.header.frame_id = self.frame_id
-            status.sequence = self.sequence
-            status.sensor_ok = False
-            status.min_temperature = math.nan
-            status.max_temperature = math.nan
-            status.center_temperature = math.nan
-            status.total_read_errors = self.total_read_errors
-            status.consecutive_read_errors = self.consecutive_read_errors
-            status.acquisition_rate_hz = 0.0
-            self.status_publisher.publish(status)
+            # A wedged sensor keeps failing — drop the reader so it gets a clean
+            # re-init on the next tick (above).
+            if self.consecutive_read_errors % 20 == 0:
+                self.reader = None
+            self._publish_fault_status()
             return
 
         now_monotonic = time.monotonic()

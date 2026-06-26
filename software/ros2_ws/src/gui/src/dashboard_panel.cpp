@@ -540,6 +540,11 @@ void DashboardPanel::onThermalToggled()
 {
     thermal_toggle_->setText(thermal_toggle_->isChecked() ? "ON" : "OFF");
     publishSensorMask();
+    // Enabling thermal makes the robot publish /sensors/thermal; re-scan sources so
+    // it shows up as a selectable video source without a manual "Reset Sources".
+    // (Source discovery preserves each cell's current selection, so this is safe.)
+    if (thermal_toggle_ && thermal_toggle_->isChecked())
+        emit resetSourcesRequested();
 }
 
 void DashboardPanel::setThermalEnabled(bool enabled)
