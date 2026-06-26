@@ -53,8 +53,10 @@ done
 
 # ── sanity ────────────────────────────────────────────────────────────────────
 [ -f "$ROS_SETUP" ] || { err "no ROS at $ROS_SETUP (set ROS_SETUP=...)"; exit 1; }
+# ROS/ament setup files aren't `set -u`-safe (reference unbound vars) — relax it
+# just around the sources.
 # shellcheck disable=SC1090
-source "$ROS_SETUP"
+set +u; source "$ROS_SETUP"; set -u
 
 if [ "$DO_BUILD" = 1 ]; then
   log "colcon build (${JETSON_PKGS[*]}) ..."
@@ -64,7 +66,7 @@ fi
 [ -f "$WS/install/setup.bash" ] || {
   err "workspace not built: $WS/install/setup.bash missing — run with --build first"; exit 1; }
 # shellcheck disable=SC1090
-source "$WS/install/setup.bash"
+set +u; source "$WS/install/setup.bash"; set -u
 
 UNITS_SRC="$WS/install/rescue_bringup/share/rescue_bringup/systemd"
 [ -d "$UNITS_SRC" ] || { err "units not found at $UNITS_SRC (build rescue_bringup)"; exit 1; }
