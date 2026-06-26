@@ -504,7 +504,7 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         open_3dmap_btn_->setMinimumHeight(28);
         open_3dmap_btn_->setToolTip("Open the live map window (renders /robot/map3d voxels + robot)");
         open_3dmap_btn_->setStyleSheet(btn_style("#2a4a7f", "#3a5a9f", "#1a3a6f"));
-        connect(open_3dmap_btn_, &QPushButton::clicked, this, &DashboardPanel::onOpenMapClicked);
+        connect(open_3dmap_btn_, &QPushButton::clicked, this, &DashboardPanel::onOpen3dMapClicked);
         m3_btn_row->addWidget(open_3dmap_btn_);
 
         layout->addLayout(m3_btn_row);
@@ -988,10 +988,19 @@ void DashboardPanel::onOpenMapClicked()
 {
     // Lazily create the standalone map window; just raise it if it exists.
     if (!map_window_)
-        map_window_ = new MapWindow(node_);   // top-level (no parent) so it's its own window
+        map_window_ = new MapWindow(node_, MapWindow::Mode::Map2D);   // top-level
     map_window_->show();
     map_window_->raise();
     map_window_->activateWindow();
+}
+
+void DashboardPanel::onOpen3dMapClicked()
+{
+    if (!map3d_window_)
+        map3d_window_ = new MapWindow(node_, MapWindow::Mode::Map3D);   // top-level
+    map3d_window_->show();
+    map3d_window_->raise();
+    map3d_window_->activateWindow();
 }
 
 // ── 3-D mapping (OctoMap) stack ──────────────────────────────────────────────

@@ -107,6 +107,7 @@ private slots:
     void onMapping3dStatusUpdated(const QString& status);
     void onMapping3dStartClicked();
     void onMapping3dStopClicked();
+    void onOpen3dMapClicked();
 
 private:
     void setConnState(const QString& color, const QString& label);
@@ -217,6 +218,7 @@ private:
     QPushButton* mapping3d_start_btn_{nullptr};
     QPushButton* mapping3d_stop_btn_{nullptr};
     QPushButton* open_3dmap_btn_{nullptr};
+    QWidget*     map3d_window_{nullptr};     // 3-D MapWindow (created lazily)
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mapping3d_status_sub_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping3d_start_cli_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping3d_stop_cli_;

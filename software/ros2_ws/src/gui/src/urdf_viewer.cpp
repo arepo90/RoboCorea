@@ -5,10 +5,14 @@
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
+#include <octomap_msgs/conversions.h>
+#include <octomap/OcTree.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <limits>
+#include <memory>
 
 static const char* VERT_SHADER = R"(
 #version 330 core
@@ -100,6 +104,45 @@ void main() {
 }
 )";
 
+// Occupied OctoMap leaves as one colored voxel VBO (3-D map mode only).
+static const char* VOXEL_VERT = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec4 aColor;
+uniform mat4 view;
+uniform mat4 projection;
+out vec3 FragPos;
+out vec3 Normal;
+out vec4 Color;
+void main() {
+    FragPos = aPos;
+    Normal = normalize(aNormal);
+    Color = aColor;
+    gl_Position = projection * view * vec4(aPos, 1.0);
+}
+)";
+
+static const char* VOXEL_FRAG = R"(
+#version 330 core
+in vec3 FragPos;
+in vec3 Normal;
+in vec4 Color;
+uniform vec3 lightDir;
+uniform vec3 viewPos;
+out vec4 FragColor;
+void main() {
+    vec3 norm = normalize(Normal);
+    float ambient = 0.32;
+    float diff = max(dot(norm, normalize(lightDir)), 0.0);
+    float back = max(dot(norm, normalize(-lightDir)), 0.0) * 0.12;
+    vec3 viewDir = normalize(viewPos - FragPos);
+    float rim = pow(1.0 - max(dot(norm, viewDir), 0.0), 2.5) * 0.20;
+    vec3 color = Color.rgb * (ambient + diff + back) + rim * vec3(0.85, 0.95, 1.0);
+    FragColor = vec4(color, Color.a);
+}
+)";
+
 static std::string resolveUri(const std::string& uri)
 {
     if (uri.size() > 10 && uri.substr(0, 10) == "package://") {
@@ -145,8 +188,10 @@ UrdfViewer::~UrdfViewer()
     if (grid_vao_) { glDeleteVertexArrays(1, &grid_vao_); glDeleteBuffers(1, &grid_vbo_); }
     if (floor_vao_) { glDeleteVertexArrays(1, &floor_vao_); glDeleteBuffers(1, &floor_vbo_); }
     if (floor_tex_) glDeleteTextures(1, &floor_tex_);
+    if (voxel_vao_) { glDeleteVertexArrays(1, &voxel_vao_); glDeleteBuffers(1, &voxel_vbo_); }
     delete shader_;
     delete tex_shader_;
+    delete voxel_shader_;
     doneCurrent();
 }
 
@@ -169,6 +214,11 @@ void UrdfViewer::initializeGL()
     tex_shader_->addShaderFromSourceCode(QOpenGLShader::Vertex, TEX_VERT);
     tex_shader_->addShaderFromSourceCode(QOpenGLShader::Fragment, TEX_FRAG);
     tex_shader_->link();
+
+    voxel_shader_ = new QOpenGLShaderProgram(this);
+    voxel_shader_->addShaderFromSourceCode(QOpenGLShader::Vertex, VOXEL_VERT);
+    voxel_shader_->addShaderFromSourceCode(QOpenGLShader::Fragment, VOXEL_FRAG);
+    voxel_shader_->link();
 
     createGrid();
 }
@@ -218,11 +268,14 @@ void UrdfViewer::paintGL()
     // drawn after FK, once we know the model's lowest point so it sits under it).
     if (map_mode_) {
         pollBaseTransform();
-        buildFloorTexture();
+        if (octomap_mode_)
+            buildVoxelBuffer();
+        else
+            buildFloorTexture();
     }
 
     // Draw grid (twin mode, or map mode before a map has arrived)
-    if (grid_vao_ && (!map_mode_ || !have_map_)) {
+    if (grid_vao_ && (!map_mode_ || octomap_mode_ || !have_map_)) {
         // Use a separate simple shader for grid — reuse main shader with identity model
         shader_->bind();
         QMatrix4x4 identity;
@@ -240,9 +293,11 @@ void UrdfViewer::paintGL()
     }
 
     if (!parsed) {
-        // No URDF yet — still show the map floor (at the default z) so the map is
-        // visible before the model loads.
-        if (map_mode_ && have_map_) drawFloor(view, projection);
+        // No URDF yet: still show whichever map product has arrived.
+        if (octomap_mode_ && have_voxels_)
+            drawVoxels(view, projection, eye);
+        else if (map_mode_ && have_map_)
+            drawFloor(view, projection);
         return;
     }
 
@@ -278,7 +333,7 @@ void UrdfViewer::paintGL()
 
     // Map mode: place the floor just under the model's lowest world point (so the
     // textured grid sits below the robot instead of cutting through it), then draw.
-    if (map_mode_ && have_map_) {
+    if (map_mode_ && !octomap_mode_ && have_map_) {
         float min_z = std::numeric_limits<float>::max();
         for (auto& [name, ld] : links_) {
             for (auto& obj : ld.visuals) {
@@ -298,6 +353,9 @@ void UrdfViewer::paintGL()
             map_floor_z_ = min_z - 0.01f;   // 1 cm clearance under the lowest point
         drawFloor(view, projection);
     }
+
+    if (octomap_mode_ && have_voxels_)
+        drawVoxels(view, projection, eye);
 
     // Render links
     shader_->bind();
@@ -363,8 +421,7 @@ void UrdfViewer::setMapMode(bool on)
 {
     map_mode_ = on;
     if (on && !map_sub_) {
-        tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node_->get_clock());
-        tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+        ensureMapTfListener();
         auto qos = rclcpp::QoS(1).reliable().transient_local();
         map_sub_ = node_->create_subscription<nav_msgs::msg::OccupancyGrid>(
             "/map", qos,
@@ -372,6 +429,32 @@ void UrdfViewer::setMapMode(bool on)
         // A higher pitch + further camera reads better for a map-scale scene.
         cam_pitch_ = 55.0f;
         cam_distance_ = 6.0f;
+    }
+}
+
+void UrdfViewer::setOctomapMode(bool on)
+{
+    octomap_mode_ = on;
+    map_mode_ = on;
+    if (on && !octomap_sub_) {
+        ensureMapTfListener();
+        auto qos = rclcpp::QoS(1).reliable().transient_local();
+        octomap_sub_ = node_->create_subscription<octomap_msgs::msg::Octomap>(
+            "/robot/map3d", qos,
+            [this](octomap_msgs::msg::Octomap::SharedPtr m) { onOctomap(m); });
+        cam_pitch_ = 38.0f;
+        cam_distance_ = 7.0f;
+        cam_target_ = QVector3D(0.0f, 0.0f, 0.8f);
+        RCLCPP_INFO(node_->get_logger(),
+                    "3D map viewer: subscribed to /robot/map3d");
+    }
+}
+
+void UrdfViewer::ensureMapTfListener()
+{
+    if (!tf_buffer_) {
+        tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node_->get_clock());
+        tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
     }
 }
 
@@ -405,6 +488,132 @@ void UrdfViewer::onMap(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
     map_oy_ = msg->info.origin.position.y;
     map_dirty_ = true;
     have_map_ = true;
+}
+
+void UrdfViewer::onOctomap(const octomap_msgs::msg::Octomap::SharedPtr msg)
+{
+    std::unique_ptr<octomap::AbstractOcTree> abstract_tree(octomap_msgs::msgToMap(*msg));
+    if (!abstract_tree) {
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                             "3D map viewer: could not deserialize OctoMap message");
+        return;
+    }
+
+    auto* tree = dynamic_cast<octomap::OcTree*>(abstract_tree.get());
+    if (!tree) {
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                             "3D map viewer: unsupported OctoMap tree type '%s'",
+                             msg->id.c_str());
+        return;
+    }
+
+    size_t occupied_count = 0;
+    double min_z = std::numeric_limits<double>::max();
+    double max_z = -std::numeric_limits<double>::max();
+    const auto end = tree->end_leafs();
+    for (auto it = tree->begin_leafs(); it != end; ++it) {
+        if (!tree->isNodeOccupied(*it))
+            continue;
+        ++occupied_count;
+        min_z = std::min(min_z, it.getZ());
+        max_z = std::max(max_z, it.getZ());
+    }
+
+    std::vector<VoxelVertex> verts;
+    if (occupied_count > 0) {
+        constexpr size_t kMaxRenderedVoxels = 120000;
+        const size_t stride = occupied_count > kMaxRenderedVoxels
+            ? (occupied_count + kMaxRenderedVoxels - 1) / kMaxRenderedVoxels
+            : 1;
+        const size_t reserve_voxels = std::min(occupied_count, kMaxRenderedVoxels);
+        verts.reserve(reserve_voxels * 36);
+
+        auto mix = [](float a, float b, float t) {
+            return a + (b - a) * t;
+        };
+        auto color_for_z = [&](double z, float out[4]) {
+            const double span = std::max(1e-6, max_z - min_z);
+            float t = static_cast<float>(std::clamp((z - min_z) / span, 0.0, 1.0));
+            const float low[3] = {0.10f, 0.38f, 0.92f};
+            const float mid[3] = {0.10f, 0.72f, 0.48f};
+            const float high[3] = {0.96f, 0.52f, 0.14f};
+            const bool upper = t > 0.5f;
+            const float local_t = upper ? (t - 0.5f) * 2.0f : t * 2.0f;
+            const float* a = upper ? mid : low;
+            const float* b = upper ? high : mid;
+            out[0] = mix(a[0], b[0], local_t);
+            out[1] = mix(a[1], b[1], local_t);
+            out[2] = mix(a[2], b[2], local_t);
+            out[3] = 1.0f;
+        };
+        auto push_vertex = [&](float x, float y, float z,
+                               float nx, float ny, float nz,
+                               const float color[4]) {
+            VoxelVertex v{};
+            v.pos[0] = x; v.pos[1] = y; v.pos[2] = z;
+            v.normal[0] = nx; v.normal[1] = ny; v.normal[2] = nz;
+            v.color[0] = color[0]; v.color[1] = color[1];
+            v.color[2] = color[2]; v.color[3] = color[3];
+            verts.push_back(v);
+        };
+        auto add_face = [&](float nx, float ny, float nz,
+                            const QVector3D& a, const QVector3D& b,
+                            const QVector3D& c, const QVector3D& d,
+                            const float color[4]) {
+            push_vertex(a.x(), a.y(), a.z(), nx, ny, nz, color);
+            push_vertex(b.x(), b.y(), b.z(), nx, ny, nz, color);
+            push_vertex(c.x(), c.y(), c.z(), nx, ny, nz, color);
+            push_vertex(c.x(), c.y(), c.z(), nx, ny, nz, color);
+            push_vertex(d.x(), d.y(), d.z(), nx, ny, nz, color);
+            push_vertex(a.x(), a.y(), a.z(), nx, ny, nz, color);
+        };
+        auto add_cube = [&](double cx, double cy, double cz, double size,
+                            const float color[4]) {
+            const float h = static_cast<float>(size * 0.48);
+            const float x0 = static_cast<float>(cx) - h;
+            const float x1 = static_cast<float>(cx) + h;
+            const float y0 = static_cast<float>(cy) - h;
+            const float y1 = static_cast<float>(cy) + h;
+            const float z0 = static_cast<float>(cz) - h;
+            const float z1 = static_cast<float>(cz) + h;
+
+            add_face( 0,  0,  1, {x0, y0, z1}, {x1, y0, z1}, {x1, y1, z1}, {x0, y1, z1}, color);
+            add_face( 0,  0, -1, {x0, y1, z0}, {x1, y1, z0}, {x1, y0, z0}, {x0, y0, z0}, color);
+            add_face( 1,  0,  0, {x1, y0, z0}, {x1, y1, z0}, {x1, y1, z1}, {x1, y0, z1}, color);
+            add_face(-1,  0,  0, {x0, y0, z1}, {x0, y1, z1}, {x0, y1, z0}, {x0, y0, z0}, color);
+            add_face( 0,  1,  0, {x0, y1, z1}, {x1, y1, z1}, {x1, y1, z0}, {x0, y1, z0}, color);
+            add_face( 0, -1,  0, {x0, y0, z0}, {x1, y0, z0}, {x1, y0, z1}, {x0, y0, z1}, color);
+        };
+
+        size_t visited_occupied = 0;
+        size_t rendered_voxels = 0;
+        for (auto it = tree->begin_leafs(); it != end; ++it) {
+            if (!tree->isNodeOccupied(*it))
+                continue;
+            if ((visited_occupied++ % stride) != 0)
+                continue;
+            if (rendered_voxels >= kMaxRenderedVoxels)
+                break;
+            float color[4];
+            color_for_z(it.getZ(), color);
+            add_cube(it.getX(), it.getY(), it.getZ(), it.getSize(), color);
+            ++rendered_voxels;
+        }
+
+        if (occupied_count > kMaxRenderedVoxels) {
+            RCLCPP_WARN_THROTTLE(
+                node_->get_logger(), *node_->get_clock(), 5000,
+                "3D map viewer: rendering %zu/%zu occupied voxels (sampled for UI safety)",
+                rendered_voxels, occupied_count);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(voxel_mutex_);
+        pending_voxels_ = std::move(verts);
+        voxels_dirty_ = true;
+    }
+    update();
 }
 
 void UrdfViewer::buildFloorTexture()
@@ -503,6 +712,60 @@ void UrdfViewer::drawFloor(const QMatrix4x4& view, const QMatrix4x4& projection)
     glDrawArrays(GL_TRIANGLES, 0, floor_vertex_count_);
     glBindVertexArray(0);
     tex_shader_->release();
+    glEnable(GL_BLEND);
+}
+
+void UrdfViewer::buildVoxelBuffer()
+{
+    std::vector<VoxelVertex> verts;
+    {
+        std::lock_guard<std::mutex> lk(voxel_mutex_);
+        if (!voxels_dirty_)
+            return;
+        verts = std::move(pending_voxels_);
+        voxels_dirty_ = false;
+    }
+
+    if (voxel_vao_ == 0) glGenVertexArrays(1, &voxel_vao_);
+    if (voxel_vbo_ == 0) glGenBuffers(1, &voxel_vbo_);
+
+    glBindVertexArray(voxel_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, voxel_vbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(verts.size() * sizeof(VoxelVertex)),
+                 verts.empty() ? nullptr : verts.data(),
+                 GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex),
+                          reinterpret_cast<void*>(offsetof(VoxelVertex, pos)));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex),
+                          reinterpret_cast<void*>(offsetof(VoxelVertex, normal)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex),
+                          reinterpret_cast<void*>(offsetof(VoxelVertex, color)));
+    glEnableVertexAttribArray(2);
+    glBindVertexArray(0);
+
+    voxel_vertex_count_ = static_cast<int>(verts.size());
+    have_voxels_ = voxel_vertex_count_ > 0;
+}
+
+void UrdfViewer::drawVoxels(const QMatrix4x4& view, const QMatrix4x4& projection,
+                            const QVector3D& eye)
+{
+    if (!(voxel_shader_ && voxel_vao_ && voxel_vertex_count_ > 0))
+        return;
+
+    glDisable(GL_BLEND);
+    voxel_shader_->bind();
+    voxel_shader_->setUniformValue("view", view);
+    voxel_shader_->setUniformValue("projection", projection);
+    voxel_shader_->setUniformValue("lightDir", QVector3D(0.5f, 0.3f, 1.0f));
+    voxel_shader_->setUniformValue("viewPos", eye);
+    glBindVertexArray(voxel_vao_);
+    glDrawArrays(GL_TRIANGLES, 0, voxel_vertex_count_);
+    glBindVertexArray(0);
+    voxel_shader_->release();
     glEnable(GL_BLEND);
 }
 

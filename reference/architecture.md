@@ -1039,10 +1039,12 @@ Things that are **not yet pinned down** and must be resolved on real hardware:
    RegulatedPurePursuit controller + costmaps + waypoint follower), a **Gazebo
    Classic** simulation of the tracked base, a **waypoint_runner** (drive to the end
    of a track and back), and the **`/cmd_vel` → traction** drive path (firmware
-   `MSG_TRACTION_CMD` 0x1A + bridge subscriber, §9.2). Note `dicerox_mapping` uses
-   ZED-only odometry, **not** the wheel-odom EKF of item 12 — the EKF (fusing
-   `/odom/wheel`) remains a future upgrade. Still open: 3D/elevation mapping for
-   ramps/stairs.
+   `MSG_TRACTION_CMD` 0x1A + bridge subscriber, §9.2). The robot-side 3D mapping
+   add-on is **`rescue_mapping3d`**: it consumes the ZED registered point cloud
+   locally on the Jetson, inserts a downsampled cloud into OctoMap, and publishes
+   only the compact binary octree on `/robot/map3d` for the GUI's 3D voxel view.
+   The raw ZED point cloud must remain robot-local so it cannot saturate the DDS
+   Wi-Fi link.
 9. **Robot/workspace naming.** This doc uses robot-neutral package names
    (`rescue_*`); the legacy used `jaguar_*`/`dicerox`. Pick final names when
    creating packages.
