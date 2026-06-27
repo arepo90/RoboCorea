@@ -28,21 +28,170 @@ Examples:
 """
 
 import argparse
+import ctypes
 import fcntl
 import glob
 import os
+import signal
 import sys
 import time
+import warnings
 
 WIDTH, HEIGHT = 32, 24            # MLX90640 native resolution
 NPIX = WIDTH * HEIGHT             # 768
 CENTER = (HEIGHT // 2) * WIDTH + (WIDTH // 2)
 I2C_SLAVE = 0x0703               # linux/i2c-dev.h ioctl
+I2C_RDWR = 0x0707
+I2C_M_RD = 0x0001
 DEFAULT_ADDR = 0x33
 
 RAMP = " .:-=+*o#%@"              # cold -> hot, used in --no-color mode
 
 REFRESH_RATES = {1, 2, 4, 8, 16, 32, 64}
+
+# adafruit_blinka warns "I2C frequency is not settable in python" -- harmless noise.
+warnings.filterwarnings('ignore', message='.*I2C frequency.*')
+
+
+# --------------------------------------------------------------------------- #
+# Hard timeout so a wedged driver init / read can never hang the script        #
+# --------------------------------------------------------------------------- #
+class Timeout(Exception):
+    pass
+
+
+def with_timeout(seconds, fn, *args, **kwargs):
+    def _raise(_signum, _frame):
+        raise Timeout()
+    old = signal.signal(signal.SIGALRM, _raise)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+# --------------------------------------------------------------------------- #
+# Raw 16-bit register / EEPROM read over I2C (combined write-addr + read,      #
+# repeated start) -- exactly how the MLX90640 must be addressed.               #
+# --------------------------------------------------------------------------- #
+class _i2c_msg(ctypes.Structure):
+    _fields_ = [('addr', ctypes.c_uint16), ('flags', ctypes.c_uint16),
+                ('len', ctypes.c_uint16), ('buf', ctypes.POINTER(ctypes.c_uint8))]
+
+
+class _i2c_rdwr(ctypes.Structure):
+    _fields_ = [('msgs', ctypes.POINTER(_i2c_msg)), ('nmsgs', ctypes.c_uint32)]
+
+
+def read_words(fd, addr, reg, nwords):
+    """Read nwords 16-bit big-endian words starting at 16-bit register `reg`."""
+    wbuf = (ctypes.c_uint8 * 2)((reg >> 8) & 0xFF, reg & 0xFF)
+    rbuf = (ctypes.c_uint8 * (nwords * 2))()
+    msgs = (_i2c_msg * 2)(
+        _i2c_msg(addr, 0, 2, ctypes.cast(wbuf, ctypes.POINTER(ctypes.c_uint8))),
+        _i2c_msg(addr, I2C_M_RD, nwords * 2, ctypes.cast(rbuf, ctypes.POINTER(ctypes.c_uint8))),
+    )
+    fcntl.ioctl(fd, I2C_RDWR, _i2c_rdwr(msgs, ctypes.c_uint32(2)))
+    return [(rbuf[i * 2] << 8) | rbuf[i * 2 + 1] for i in range(nwords)]
+
+
+def read_bytes(fd, addr, reg, n=1):
+    """Read n bytes from 8-bit sub-register `reg` (repeated-start combined xfer)."""
+    wbuf = (ctypes.c_uint8 * 1)(reg & 0xFF)
+    rbuf = (ctypes.c_uint8 * n)()
+    msgs = (_i2c_msg * 2)(
+        _i2c_msg(addr, 0, 1, ctypes.cast(wbuf, ctypes.POINTER(ctypes.c_uint8))),
+        _i2c_msg(addr, I2C_M_RD, n, ctypes.cast(rbuf, ctypes.POINTER(ctypes.c_uint8))),
+    )
+    fcntl.ioctl(fd, I2C_RDWR, _i2c_rdwr(msgs, ctypes.c_uint32(2)))
+    return list(rbuf)
+
+
+def write_byte(fd, addr, reg, val):
+    wbuf = (ctypes.c_uint8 * 2)(reg & 0xFF, val & 0xFF)
+    msgs = (_i2c_msg * 1)(
+        _i2c_msg(addr, 0, 2, ctypes.cast(wbuf, ctypes.POINTER(ctypes.c_uint8))))
+    fcntl.ioctl(fd, I2C_RDWR, _i2c_rdwr(msgs, ctypes.c_uint32(1)))
+
+
+# --------------------------------------------------------------------------- #
+# Cross-check: read the LIS3MDL magnetometer on the SAME bus. If it reads      #
+# cleanly, the I2C bus/controller is fine and the MLX90640 (or its wiring) is  #
+# the fault; if it ALSO fails, the whole bus is suspect.                       #
+# --------------------------------------------------------------------------- #
+LIS3MDL_WHOAMI = 0x3D
+LIS3MDL_SENS_UT = 100.0 / 6842.0   # raw -> microtesla at +/-4 gauss full scale
+
+
+def check_magnetometer(bus, addrs=(0x1C, 0x1E), samples=5):
+    print('\n-- Magnetometer cross-check (LIS3MDL on bus %d) --' % bus)
+    try:
+        fd = os.open('/dev/i2c-%d' % bus, os.O_RDWR)
+    except OSError as exc:
+        print('  cannot open /dev/i2c-%d: %s' % (bus, exc))
+        return None
+    try:
+        addr = who = None
+        for a in addrs:
+            try:
+                w = read_bytes(fd, a, 0x0F, 1)[0]
+                print('  0x%02x WHO_AM_I = 0x%02X (expect 0x3D)' % (a, w))
+                if w == LIS3MDL_WHOAMI:
+                    addr, who = a, w
+                    break
+            except OSError as exc:
+                print('  0x%02x : no response (%s)' % (a, exc))
+        if addr is None:
+            print('  VERDICT: magnetometer not readable -> bus/controller itself is '
+                  'suspect (not just the MLX90640).')
+            return False
+
+        # Configure: ultra-high-perf XY/Z, 10 Hz, +/-4 gauss, continuous-conversion.
+        try:
+            write_byte(fd, addr, 0x20, 0x70)   # CTRL1: OM=UHP, DO=10Hz, temp off
+            write_byte(fd, addr, 0x21, 0x00)   # CTRL2: FS = +/-4 gauss
+            write_byte(fd, addr, 0x23, 0x0C)   # CTRL4: OMZ = UHP
+            write_byte(fd, addr, 0x22, 0x00)   # CTRL3: continuous-conversion
+        except OSError as exc:
+            print('  config write failed: %s -> bus is unreliable for writes too.' % exc)
+            return False
+        time.sleep(0.15)
+
+        def s16(lo, hi):
+            v = lo | (hi << 8)
+            return v - 65536 if v >= 32768 else v
+
+        mags, errs = [], 0
+        for _ in range(samples):
+            try:
+                d = read_bytes(fd, addr, 0x28 | 0x80, 6)   # 0x80 = auto-increment
+                x, y, z = (s16(d[0], d[1]) * LIS3MDL_SENS_UT,
+                           s16(d[2], d[3]) * LIS3MDL_SENS_UT,
+                           s16(d[4], d[5]) * LIS3MDL_SENS_UT)
+                mag = (x * x + y * y + z * z) ** 0.5
+                mags.append(mag)
+                print('  X %+7.1f  Y %+7.1f  Z %+7.1f uT   |B| %6.1f uT' % (x, y, z, mag))
+            except OSError as exc:
+                errs += 1
+                print('  read error: %s' % exc)
+            time.sleep(0.1)
+
+        # Earth's field is ~25-65 uT; near motors/metal it can read higher but
+        # should be stable and non-zero. Mainly we care that reads succeed.
+        if errs == 0 and mags and not all(m == mags[0] for m in mags):
+            plausible = 5.0 < (sum(mags) / len(mags)) < 1000.0
+            print('  VERDICT: magnetometer reads CLEANLY on bus %d%s.' %
+                  (bus, '' if plausible else ' (values odd, but I2C transfer works)'))
+            print('  => The I2C bus is healthy; the MLX90640 device/wiring/pull-ups '
+                  'is the fault, not the Jetson I2C controller.')
+            return True
+        print('  VERDICT: magnetometer reads are failing/stuck too -> the I2C bus '
+              'or controller (not just the MLX90640) is the problem.')
+        return False
+    finally:
+        os.close(fd)
 
 
 # --------------------------------------------------------------------------- #
@@ -90,9 +239,64 @@ def scan_buses(addr):
 
 
 # --------------------------------------------------------------------------- #
-# Step 2: open the Adafruit driver (this reads the EEPROM -> the flaky part)   #
+# Step 2: raw register/EEPROM diagnostic -- the driver hangs on corrupt EEPROM #
 # --------------------------------------------------------------------------- #
-def open_sensor(bus, addr, refresh, attempts=5):
+def diagnose(bus, addr, samples=4):
+    """Read key registers + an EEPROM sample a few times; judge I2C integrity."""
+    path = '/dev/i2c-%d' % bus
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError as exc:
+        print('  cannot open %s: %s' % (path, exc))
+        return False
+    try:
+        fcntl.ioctl(fd, I2C_SLAVE, addr)
+        # Control reg 0x800D defaults to ~0x1901; status 0x8000. Both should be
+        # stable across reads. EEPROM 0x2400.. should be varied & non-zero.
+        ctrl = []
+        for _ in range(samples):
+            try:
+                ctrl.append(read_words(fd, addr, 0x800D, 1)[0])
+            except OSError as exc:
+                ctrl.append(None)
+                print('  control-reg read failed: %s' % exc)
+            time.sleep(0.02)
+        shown = ' '.join('----' if v is None else '%04X' % v for v in ctrl)
+        print('  control reg 0x800D x%d : %s' % (samples, shown))
+
+        try:
+            ee = read_words(fd, addr, 0x2400, 64)
+        except OSError as exc:
+            print('  EEPROM read failed: %s' % exc)
+            print('  VERDICT: I2C reads are failing outright -- the device ACKs but '
+                  'data transfer errors. Bad wiring/pull-ups/bus speed.')
+            return False
+
+        zeros = ee.count(0x0000)
+        ffs = ee.count(0xFFFF)
+        uniq = len(set(ee))
+        print('  EEPROM 0x2400 sample  : %s ...' % ' '.join('%04X' % w for w in ee[:8]))
+        print('  EEPROM 64-word health : %d zero, %d 0xFFFF, %d distinct values'
+              % (zeros, ffs, uniq))
+
+        ctrl_ok = len({v for v in ctrl if v is not None}) == 1 and ctrl[0] not in (None, 0x0000, 0xFFFF)
+        ee_ok = zeros < 16 and ffs < 16 and uniq > 20
+        if ctrl_ok and ee_ok:
+            print('  VERDICT: I2C reads look CLEAN -- registers stable, EEPROM varied.')
+            return True
+        print('  VERDICT: I2C reads look CORRUPT/UNSTABLE -- this is why the driver '
+              'hangs. Likely a noisy/long I2C wire, weak pull-ups, or too-high bus '
+              'speed on /dev/i2c-%d.' % bus)
+        return False
+    finally:
+        os.close(fd)
+
+
+# --------------------------------------------------------------------------- #
+# Step 3: open the Adafruit driver (this reads the EEPROM -> the flaky part).  #
+# Guarded by a timeout because corrupt EEPROM makes its init loop forever.     #
+# --------------------------------------------------------------------------- #
+def open_sensor(bus, addr, refresh, attempts=5, init_timeout=6.0):
     try:
         from adafruit_extended_bus import ExtendedI2C as I2C
         import adafruit_mlx90640
@@ -102,26 +306,30 @@ def open_sensor(bus, addr, refresh, attempts=5):
                  '  pip3 install adafruit-circuitpython-mlx90640 adafruit-extended-bus'
                  % exc)
 
+    def _init():
+        mlx = adafruit_mlx90640.MLX90640(I2C(bus), address=addr)
+        mlx.refresh_rate = getattr(
+            adafruit_mlx90640.RefreshRate, 'REFRESH_%d_HZ' % refresh)
+        return mlx
+
     last = None
     for i in range(attempts):
         try:
-            mlx = adafruit_mlx90640.MLX90640(I2C(bus), address=addr)
-            mlx.refresh_rate = getattr(
-                adafruit_mlx90640.RefreshRate, 'REFRESH_%d_HZ' % refresh)
-            if i:
-                print('  EEPROM/init OK on attempt %d' % (i + 1))
-            else:
-                print('  EEPROM/init OK')
+            mlx = with_timeout(init_timeout, _init)
+            print('  EEPROM/init OK%s' % (' on attempt %d' % (i + 1) if i else ''))
             return mlx
+        except Timeout:
+            last = 'init hung > %.0fs (corrupt EEPROM read -> infinite loop)' % init_timeout
+            print('  init attempt %d/%d: %s' % (i + 1, attempts, last))
         except Exception as exc:                       # noqa: BLE001
-            last = exc
-            print('  init attempt %d/%d failed: %s: %s'
-                  % (i + 1, attempts, type(exc).__name__, exc))
-            time.sleep(0.5)
-    sys.exit('\nCould not initialise the MLX90640 after %d attempts: %s\n'
-             'The device answered the bus scan but the driver could not read it '
-             '-- usually a noisy/long I2C wire, a pull-up, or a too-high bus '
-             'speed.' % (attempts, last))
+            last = '%s: %s' % (type(exc).__name__, exc)
+            print('  init attempt %d/%d failed: %s' % (i + 1, attempts, last))
+        time.sleep(0.5)
+    sys.exit('\nCould not initialise the MLX90640 after %d attempts (%s).\n'
+             'The device answers the bus but its EEPROM does not read cleanly. '
+             'Fix the I2C link: shorter/shielded wires, add/strengthen 4.7k pull-ups '
+             'to 3.3V, and/or lower the i2c-%d bus clock (devicetree). '
+             'See the diagnostic verdict above.' % (attempts, last, bus))
 
 
 # --------------------------------------------------------------------------- #
@@ -179,6 +387,12 @@ def main():
                     help='grab a few frames, print a pass/fail summary, then exit')
     ap.add_argument('--range', nargs=2, type=float, metavar=('LO', 'HI'),
                     help='fixed display temp range in C (default: auto per frame)')
+    ap.add_argument('--mag-address', type=lambda s: int(s, 0), default=None,
+                    help='LIS3MDL address for the bus cross-check (default: probe 0x1C/0x1E)')
+    ap.add_argument('--no-mag', action='store_true',
+                    help='skip the magnetometer (LIS3MDL) bus cross-check')
+    ap.add_argument('--no-diagnose', action='store_true',
+                    help='skip the raw MLX90640 EEPROM diagnostic')
     args = ap.parse_args()
     color = not args.no_color
 
@@ -195,6 +409,15 @@ def main():
         bus = found[0]
         if len(found) > 1:
             print('  multiple buses responded %s; using %d' % (found, bus))
+
+    # Cross-check the bus with the magnetometer + raw EEPROM read BEFORE the
+    # driver, so the diagnosis prints even if the driver init bails out.
+    if not args.no_mag:
+        addrs = (args.mag_address,) if args.mag_address else (0x1C, 0x1E)
+        check_magnetometer(bus, addrs)
+    if not args.no_diagnose:
+        print('\n-- MLX90640 raw EEPROM diagnostic (bus %d, 0x%02x) --' % (bus, args.address))
+        diagnose(bus, args.address)
 
     print('\nOpening sensor on bus %d (reads EEPROM) ...' % bus)
     mlx = open_sensor(bus, args.address, args.refresh)
