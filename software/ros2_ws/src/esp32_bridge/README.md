@@ -64,10 +64,13 @@ ros2 launch esp32_bridge esp32_bridge.launch.py
 ros2 launch esp32_bridge esp32_bridge.launch.py serial_port:=/dev/serial/by-id/usb-...
 ```
 
-By default the node scans only the allowlisted globs in `serial_candidates`
-(`/dev/serial/by-id/*,/dev/serial/by-path/*`). Raw `/dev/ttyUSB*` probing is
-opt-in by changing that parameter. Each candidate is opened asynchronously and
-bound only after firmware sends `MSG_BOARD_IDENTITY`.
+By default the node scans the allowlisted globs in `serial_candidates`
+(`/dev/ttyCH341USB*,/dev/serial/by-id/*,/dev/serial/by-path/*`). The
+`ttyCH341USB*` entry is the Jetson's out-of-tree WCH CH341 driver name for the
+ESP32 boards' CH340 UART — there they do NOT enumerate as `ttyUSB*` nor under
+`/dev/serial/by-id`, so the bridge would otherwise miss them. Raw `/dev/ttyUSB*`
+probing remains opt-in by changing that parameter. Each candidate is opened
+asynchronously and bound only after firmware sends `MSG_BOARD_IDENTITY`.
 
 Discovery re-runs every `discovery_period` seconds (default 2 s) and is keyed by
 resolved device (`realpath`), so a board matched by both the by-id and by-path

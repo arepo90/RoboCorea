@@ -219,7 +219,11 @@ class ESP32BridgeNode(Node):
         super().__init__('esp32_bridge')
 
         self.declare_parameter('serial_port', '')
-        self.declare_parameter('serial_candidates', '/dev/serial/by-id/*,/dev/serial/by-path/*')
+        # /dev/ttyCH341USB* is the Jetson's out-of-tree WCH CH341 driver name for the
+        # ESP32 PCBs' CH340 UART (the stock kernel lacks CH341, so they do NOT appear
+        # as ttyUSB* nor under /dev/serial/by-id). The bridge opens every match and
+        # auto-detects each board's role, so a single glob covers chassis + arm PCBs.
+        self.declare_parameter('serial_candidates', '/dev/ttyCH341USB*,/dev/serial/by-id/*,/dev/serial/by-path/*')
         self.declare_parameter('baud_rate', 921600)
         self.declare_parameter('reconnect_period', 3.0)
         self.declare_parameter('discovery_period', 2.0)
