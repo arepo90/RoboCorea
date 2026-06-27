@@ -31,6 +31,7 @@ setup(
         'console_scripts': [
             'waypoint_runner = rescue_nav.waypoint_runner:main',
             'adaptive_odom_covariance = rescue_nav.adaptive_odom_covariance:main',
+            'nav_preflight = rescue_nav.nav_preflight:main',
         ],
     },
 )

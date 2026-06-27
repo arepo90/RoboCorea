@@ -50,6 +50,13 @@ public:
     // default. RViz "2D Pose Estimate" behaviour.
     void setInitialPoseMode(bool on);
 
+    // Goal-pose pick (2-D map mode): mirrors setInitialPoseMode but for a Nav2
+    // navigation goal — click = X/Y, drag = yaw. The viewer does NOT publish; it
+    // only emits goalPosePicked so the owner (MapWindow) can send it through a
+    // NavigateToPose action client (and track status). Mutually exclusive with
+    // the initial-pose mode. RViz "Nav2 Goal" behaviour.
+    void setGoalPoseMode(bool on);
+
     // Orientation follow: rotate the model's base by the robot's live attitude
     // (the orientation quaternion of an odometry topic) so the twin shows the
     // real behaviour. Camera control is unaffected. If no odometry arrives the
@@ -63,6 +70,9 @@ signals:
     // map frame (m), yaw in degrees.
     void initialPosePreview(double x, double y, double yaw_deg);
     void initialPosePicked(double x, double y, double yaw_deg);
+    // Same, for a Nav2 goal pick (when goal-pose mode is armed).
+    void goalPosePreview(double x, double y, double yaw_deg);
+    void goalPosePicked(double x, double y, double yaw_deg);
 
 protected:
     void initializeGL() override;
@@ -234,8 +244,11 @@ private:
     // false if the ray is parallel to the plane.
     bool worldOnPlane(const QPoint& px, float plane_z, QVector3D& out) const;
 
-    // ── Initial-pose pick (2-D map mode) ─────────────────────────────────────
+    // ── Initial-pose / goal-pose pick (2-D map mode) ─────────────────────────
+    // The two modes share the click-drag picking machinery and are mutually
+    // exclusive; goal_pose_mode_ routes the result to goalPosePicked instead.
     bool      initial_pose_mode_{false};
+    bool      goal_pose_mode_{false};
     bool      picking_{false};
     QVector3D pick_start_{0, 0, 0};   // map-frame X/Y of the press (= robot position)
     QVector3D pick_cur_{0, 0, 0};     // map-frame X/Y of the current/release point

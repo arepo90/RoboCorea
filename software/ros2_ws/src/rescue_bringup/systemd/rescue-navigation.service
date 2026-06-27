@@ -1,0 +1,27 @@
+[Unit]
+Description=RoboCorea Nav2 navigation stack (planner + controller + BT + smoother)
+# On-demand, started by robot_manager when the operator starts the Navigation
+# stack from the GUI. This runs Nav2 ONLY (nav2.launch.py); it sits on top of an
+# already-running localization layer (rescue-localization.service, which owns
+# map->odom + /map + the odom->base_footprint TF + /scan_flat). Start order:
+#   1. sensors  (rescue-sensors.target)
+#   2. load a map -> rescue-localization.service  (AMCL + map_server + EKF)
+#   3. THIS unit -> Nav2  (then set the start pose + send a goal)
+# Nav2 only PUBLISHES /cmd_vel; the robot does not move until esp32_bridge is run
+# with enable_cmd_vel_drive:=true (GUI "AUTO DRIVE" toggle). See architecture §16.
+# After= is an ordering hint only (no Requires): the pre-flight validator is what
+# actually blocks navigation start until localization/TF/scan are healthy.
+After=rescue-localization.service
+
+[Service]
+# Must match the workstation/GUI domain.
+Environment=ROS_DOMAIN_ID=20
+# Nav2-only on the real-robot params (use_sim_time:=false, /odometry/filtered +
+# /scan_flat + base_footprint). params_file is resolved from the installed share
+# dir so it works with or without --symlink-install. Adjust the workspace path if
+# yours differs.
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch rescue_nav nav2.launch.py use_sim_time:=false params_file:=$(ros2 pkg prefix rescue_nav)/share/rescue_nav/config/nav2_real_params.yaml'
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=15
+Restart=no

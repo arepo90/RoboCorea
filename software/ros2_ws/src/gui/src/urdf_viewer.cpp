@@ -385,14 +385,16 @@ void UrdfViewer::paintGL()
 void UrdfViewer::mousePressEvent(QMouseEvent* e)
 {
     last_mouse_pos_ = e->pos();
-    // Initial-pose pick: left-press in 2-D map mode starts the pose (X/Y).
-    if (initial_pose_mode_ && map_mode_ && !octomap_mode_ && (e->button() == Qt::LeftButton)) {
+    // Initial-pose / goal pick: left-press in 2-D map mode starts the pose (X/Y).
+    if ((initial_pose_mode_ || goal_pose_mode_) && map_mode_ && !octomap_mode_ &&
+        (e->button() == Qt::LeftButton)) {
         QVector3D w;
         if (worldOnPlane(e->pos(), map_floor_z_, w)) {
             pick_start_ = w;
             pick_cur_ = w;
             picking_ = true;
-            emit initialPosePreview(w.x(), w.y(), 0.0);
+            if (goal_pose_mode_) emit goalPosePreview(w.x(), w.y(), 0.0);
+            else                 emit initialPosePreview(w.x(), w.y(), 0.0);
         }
         return;
     }
@@ -400,15 +402,19 @@ void UrdfViewer::mousePressEvent(QMouseEvent* e)
 
 void UrdfViewer::mouseMoveEvent(QMouseEvent* e)
 {
-    // Initial-pose pick: dragging sets yaw from the press point toward the cursor.
+    // Pose pick: dragging sets yaw from the press point toward the cursor.
     if (picking_) {
         QVector3D w;
         if (worldOnPlane(e->pos(), map_floor_z_, w)) {
             pick_cur_ = w;
             double yaw = std::atan2(pick_cur_.y() - pick_start_.y(),
                                     pick_cur_.x() - pick_start_.x());
-            emit initialPosePreview(pick_start_.x(), pick_start_.y(),
-                                    qRadiansToDegrees(yaw));
+            if (goal_pose_mode_)
+                emit goalPosePreview(pick_start_.x(), pick_start_.y(),
+                                     qRadiansToDegrees(yaw));
+            else
+                emit initialPosePreview(pick_start_.x(), pick_start_.y(),
+                                        qRadiansToDegrees(yaw));
         }
         return;
     }
@@ -436,6 +442,12 @@ void UrdfViewer::mouseReleaseEvent(QMouseEvent* e)
 
     const double yaw = std::atan2(pick_cur_.y() - pick_start_.y(),
                                   pick_cur_.x() - pick_start_.x());
+    if (goal_pose_mode_) {
+        // The viewer does not publish the goal — the owner sends it via the
+        // NavigateToPose action client (so it can track status / cancel).
+        emit goalPosePicked(pick_start_.x(), pick_start_.y(), qRadiansToDegrees(yaw));
+        return;
+    }
     if (initpose_pub_) {
         geometry_msgs::msg::PoseWithCovarianceStamped msg;
         msg.header.frame_id = "map";
@@ -457,12 +469,21 @@ void UrdfViewer::mouseReleaseEvent(QMouseEvent* e)
 void UrdfViewer::setInitialPoseMode(bool on)
 {
     initial_pose_mode_ = on;
+    if (on) goal_pose_mode_ = false;   // mutually exclusive
     picking_ = false;
     if (on && !initpose_pub_) {
         initpose_pub_ = node_->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
             "/initialpose", rclcpp::QoS(1).reliable());
     }
-    setCursor(on ? Qt::CrossCursor : Qt::ArrowCursor);
+    setCursor((initial_pose_mode_ || goal_pose_mode_) ? Qt::CrossCursor : Qt::ArrowCursor);
+}
+
+void UrdfViewer::setGoalPoseMode(bool on)
+{
+    goal_pose_mode_ = on;
+    if (on) initial_pose_mode_ = false;   // mutually exclusive
+    picking_ = false;
+    setCursor((initial_pose_mode_ || goal_pose_mode_) ? Qt::CrossCursor : Qt::ArrowCursor);
 }
 
 void UrdfViewer::cameraMatrices(QMatrix4x4& view, QMatrix4x4& projection) const

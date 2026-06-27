@@ -18,6 +18,8 @@ find_package(std_srvs REQUIRED)                             # arm lifecycle Trig
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)                            # map window: NavigateToPose goal
+find_package(rclcpp_action REQUIRED)                        # map window: NavigateToPose action client
 find_package(octomap_msgs REQUIRED)
 find_package(octomap REQUIRED)
 find_package(tf2 REQUIRED)                                   # map window: robot pose
@@ -135,11 +137,13 @@ endif()
 
 ament_target_dependencies(gui
   rclcpp
+  rclcpp_action
   std_msgs
   std_srvs
   sensor_msgs
   geometry_msgs
   nav_msgs
+  nav2_msgs
   octomap_msgs
   tf2
   tf2_ros

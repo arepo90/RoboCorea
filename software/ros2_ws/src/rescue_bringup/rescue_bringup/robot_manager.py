@@ -52,6 +52,10 @@ DEFAULT_STACKS = {
     # GUI map-load (it writes the active-map env first); robot_manager just gives
     # the GUI status + a stop, and includes it in the GUI's stop-on-close sweep.
     'localization': ('rescue-localization.service', ['rescue-localization.service']),
+    # Nav2 navigation stack (planner/controller/BT/smoother). Started explicitly by
+    # the operator AFTER a map is loaded (localization up); sits on top of it. Only
+    # publishes /cmd_vel — the robot moves only with the GUI "AUTO DRIVE" toggle on.
+    'navigation': ('rescue-navigation.service', ['rescue-navigation.service']),
 }
 
 
@@ -69,7 +73,8 @@ class RobotManager(Node):
         super().__init__('robot_manager')
 
         self.declare_parameter(
-            'stacks', ['sensors', 'mapping', 'mapping3d', 'localization'])
+            'stacks',
+            ['sensors', 'i2c', 'mapping', 'mapping3d', 'localization', 'navigation'])
         self.declare_parameter('status_period', 0.5)   # 2 Hz: snappier GUI labels
         names = list(self.get_parameter('stacks').value)
         period = float(self.get_parameter('status_period').value)
