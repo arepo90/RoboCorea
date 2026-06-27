@@ -230,6 +230,11 @@ class ESP32BridgeNode(Node):
             self.get_logger().warn(
                 f'joint_command_signs must have 6 values, got {len(self._joint_command_signs)}; using defaults')
             self._joint_command_signs = [-1.0, -1.0, -1.0, -1.0, -1.0, 1.0]
+        # Last-known arm joint pose (radians), merged per-joint from /joint_states.
+        # /joint_states carries the arm joints (servo_node) and the flipper joints
+        # (flipper_state) on the same topic; we must NOT zero-fill the joints a
+        # given message omits, or a flipper-only update would snap the arm to 0.
+        self._last_arm_rad = {n: 0.0 for n in self._joint_names}
 
         # Track odometry parameters.
         self.declare_parameter('traction_id_left', 60)
@@ -869,8 +874,17 @@ class ESP32BridgeNode(Node):
         if not msg.name or not msg.position:
             return
         name_to_pos = dict(zip(msg.name, msg.position))
+        # Merge per-joint into the cached arm pose. Only update joints this
+        # message actually carries; a flipper-only update (from flipper_state)
+        # carries none of the arm joints, so it leaves the cache untouched and
+        # is not forwarded — avoiding a spurious "snap the arm to 0" command.
+        present = [n for n in self._joint_names if n in name_to_pos]
+        if not present:
+            return
+        for n in present:
+            self._last_arm_rad[n] = name_to_pos[n]
         degs = [
-            math.degrees(name_to_pos.get(n, 0.0)) * self._joint_command_signs[i]
+            math.degrees(self._last_arm_rad[n]) * self._joint_command_signs[i]
             for i, n in enumerate(self._joint_names)
         ]
         payload = struct.pack('<' + 'h' * 6, *[int(d * 100.0) for d in degs])
