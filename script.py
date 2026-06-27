@@ -195,6 +195,97 @@ def check_magnetometer(bus, addrs=(0x1C, 0x1E), samples=5):
 
 
 # --------------------------------------------------------------------------- #
+# Full 832-word EEPROM test. The driver reads the whole EEPROM in one big      #
+# burst; if that burst is corrupt (but small reads are fine), it explains both #
+# "More than 4 outlier pixels" AND the init hang. Compares a big single read   #
+# against itself and against a chunked read.                                   #
+# --------------------------------------------------------------------------- #
+EE_ADDR, EE_WORDS = 0x2400, 832
+
+
+def count_defects(ee):
+    """Replicate the driver's broken/outlier-pixel rule over per-pixel words."""
+    broken = outlier = 0
+    for p in range(768):
+        w = ee[64 + p]
+        if w == 0:
+            broken += 1
+        elif w & 0x0001:
+            outlier += 1
+    return broken, outlier
+
+
+def read_eeprom(fd, addr, chunk=None):
+    if chunk is None:                       # one big burst (what the driver does)
+        return read_words(fd, addr, EE_ADDR, EE_WORDS)
+    out = []
+    a, left = EE_ADDR, EE_WORDS
+    while left:
+        k = min(chunk, left)
+        out += read_words(fd, addr, a, k)
+        a += k
+        left -= k
+    return out
+
+
+def full_eeprom_test(bus, addr, chunk=32):
+    print('\n-- Full EEPROM read test (%d words) --' % EE_WORDS)
+    try:
+        fd = os.open('/dev/i2c-%d' % bus, os.O_RDWR)
+    except OSError as exc:
+        print('  cannot open /dev/i2c-%d: %s' % (bus, exc))
+        return
+    try:
+        try:
+            big_a = read_eeprom(fd, addr)
+            big_b = read_eeprom(fd, addr)
+            chunked = read_eeprom(fd, addr, chunk=chunk)
+        except OSError as exc:
+            print('  read failed: %s' % exc)
+            return
+        diff_bb = sum(1 for x, y in zip(big_a, big_b) if x != y)
+        diff_bc = sum(1 for x, y in zip(big_a, chunked) if x != y)
+        ba_brk, ba_out = count_defects(big_a)
+        ch_brk, ch_out = count_defects(chunked)
+        print('  big read A vs big read B : %d words differ %s'
+              % (diff_bb, '(NON-DETERMINISTIC -> corrupt burst)' if diff_bb else '(stable)'))
+        print('  big read A vs chunked    : %d words differ' % diff_bc)
+        print('  defect pixels  big: %d broken / %d outlier   chunked: %d broken / %d outlier'
+              % (ba_brk, ba_out, ch_brk, ch_out))
+        print('  (driver aborts when broken>4 or outlier>4)')
+        if diff_bb or diff_bc:
+            print('  VERDICT: the big EEPROM burst is corrupt while small reads are '
+                  'clean. Re-run with  --chunked %d  to patch the driver to read in '
+                  'small bursts, and/or lower the i2c-%d bus clock.' % (chunk, bus))
+        elif ba_out > 4 or ba_brk > 4:
+            print('  VERDICT: EEPROM reads consistently but reports >4 defect pixels '
+                  '-- the sensor itself is likely defective (or genuinely has many '
+                  'bad pixels). Try  --chunked  /  --relax  to use it anyway.')
+        else:
+            print('  VERDICT: EEPROM looks fine here -- failure may be transient; retry.')
+    finally:
+        os.close(fd)
+
+
+def install_chunked_reader(mod, bus, addr, chunk):
+    """Patch MLX90640._I2CReadWords to read in small bursts over raw i2c-dev."""
+    fd = os.open('/dev/i2c-%d' % bus, os.O_RDWR)
+
+    def _reader(self, start, buffer, *, end=None):
+        n = end if end is not None else len(buffer)
+        got, a = 0, start
+        while got < n:
+            k = min(chunk, n - got)
+            buffer[got:got + k] = read_words(fd, addr, a, k)
+            got += k
+            a += k
+        return buffer
+
+    mod.MLX90640._I2CReadWords = _reader
+    print('  [chunked] reading EEPROM/frames %d words per I2C burst' % chunk)
+
+
+# --------------------------------------------------------------------------- #
 # Step 1: raw I2C bus scan (no driver, just ioctl + a 1-byte read)            #
 # --------------------------------------------------------------------------- #
 def i2c_present(busnum, addr):
@@ -296,7 +387,19 @@ def diagnose(bus, addr, samples=4):
 # Step 3: open the Adafruit driver (this reads the EEPROM -> the flaky part).  #
 # Guarded by a timeout because corrupt EEPROM makes its init loop forever.     #
 # --------------------------------------------------------------------------- #
-def open_sensor(bus, addr, refresh, attempts=5, init_timeout=6.0):
+def install_relaxed_defects(mod):
+    """Swallow the driver's '>4 defect pixels' abort so a marginal sensor still runs."""
+    orig = mod.MLX90640._ExtractDeviatingPixels
+
+    def _relaxed(self):
+        try:
+            orig(self)
+        except RuntimeError as exc:
+            print('  [relax] ignoring driver defect check: %s' % exc)
+    mod.MLX90640._ExtractDeviatingPixels = _relaxed
+
+
+def open_sensor(bus, addr, refresh, attempts=5, init_timeout=6.0, chunk=None, relax=False):
     try:
         from adafruit_extended_bus import ExtendedI2C as I2C
         import adafruit_mlx90640
@@ -305,6 +408,11 @@ def open_sensor(bus, addr, refresh, attempts=5, init_timeout=6.0):
                  'Install with:\n'
                  '  pip3 install adafruit-circuitpython-mlx90640 adafruit-extended-bus'
                  % exc)
+
+    if chunk:
+        install_chunked_reader(adafruit_mlx90640, bus, addr, chunk)
+    if relax:
+        install_relaxed_defects(adafruit_mlx90640)
 
     def _init():
         mlx = adafruit_mlx90640.MLX90640(I2C(bus), address=addr)
@@ -393,6 +501,11 @@ def main():
                     help='skip the magnetometer (LIS3MDL) bus cross-check')
     ap.add_argument('--no-diagnose', action='store_true',
                     help='skip the raw MLX90640 EEPROM diagnostic')
+    ap.add_argument('--chunked', nargs='?', type=int, const=32, default=None, metavar='N',
+                    help='workaround: patch the driver to read EEPROM/frames N words '
+                         'per I2C burst (default 32) instead of one big corrupt burst')
+    ap.add_argument('--relax', action='store_true',
+                    help="ignore the driver's >4 defect-pixel abort and use the sensor anyway")
     args = ap.parse_args()
     color = not args.no_color
 
@@ -418,9 +531,12 @@ def main():
     if not args.no_diagnose:
         print('\n-- MLX90640 raw EEPROM diagnostic (bus %d, 0x%02x) --' % (bus, args.address))
         diagnose(bus, args.address)
+        full_eeprom_test(bus, args.address)
 
-    print('\nOpening sensor on bus %d (reads EEPROM) ...' % bus)
-    mlx = open_sensor(bus, args.address, args.refresh)
+    print('\nOpening sensor on bus %d (reads EEPROM)%s ...'
+          % (bus, ' [chunked]' if args.chunked else ''))
+    mlx = open_sensor(bus, args.address, args.refresh,
+                      chunk=args.chunked, relax=args.relax)
 
     frame = [0.0] * NPIX
     reads = errors = consec = 0
