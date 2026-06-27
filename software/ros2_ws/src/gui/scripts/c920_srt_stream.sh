@@ -30,8 +30,8 @@ set -euo pipefail
 #   then use the stable form  hw:CARD=C920,DEV=0  (NOT hw:N — numbers move).
 # NOTE: fields are ';'-separated because ALSA device strings contain ':'.
 CAMERAS=(
-    "/dev/video0;8890;hw:CARD=C920,DEV=0"   # Front: video + mic (A/V)
-    "/dev/video2;8891;"                      # Rear:  video only
+    #"/dev/video0;8890;hw:CARD=C920,DEV=0"   # Front: video + mic (A/V)
+    "/dev/video0;8890;"                      # Rear:  video only
 )
 
 WIDTH=1280
