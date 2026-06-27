@@ -4,6 +4,7 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QVBoxLayout>
 
@@ -56,6 +57,8 @@ PerceptionPanel::PerceptionPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     // ROS thread → Qt thread for every stack's status.
     connect(this, &PerceptionPanel::stackStatusReceived,
             this, &PerceptionPanel::onStackStatus, Qt::QueuedConnection);
+    connect(this, &PerceptionPanel::preflightReceived,
+            this, &PerceptionPanel::onPreflight, Qt::QueuedConnection);
 
     auto* intro = new QLabel(
         "Start/stop the robot's perception stacks on the Jetson (via robot_manager). "
@@ -99,6 +102,30 @@ PerceptionPanel::PerceptionPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
              "a map from the Maps tab — that (re)starts this with the right map; "
              "Start here re-localizes on the most recently loaded one.",
              "Stop 2-D localization on the robot");
+
+    addStack(layout, "navigation", "Navigation (Nav2)", "Start Nav",
+             "Start the Nav2 stack (planner + controller + behaviors) on the robot "
+             "(rescue-navigation.service). Load a map and start Localization first — "
+             "the pre-flight check below must be green. Nav2 only plans; the robot "
+             "moves only with AUTO DRIVE on.",
+             "Cleanly stop Nav2 on the robot");
+
+    // nav_preflight readiness — sits under the Navigation stack and gates its start.
+    preflight_label_ = new QLabel("preflight: —", this);
+    preflight_label_->setWordWrap(true);
+    preflight_label_->setStyleSheet("color: #888; font-size: 11px;");
+    preflight_label_->setToolTip(
+        "Navigation readiness from nav_preflight (runs with Localization). "
+        "scan/odom/tf/map are CRITICAL — Start Nav is blocked until they pass.");
+    layout->addWidget(preflight_label_);
+    {
+        auto qos = rclcpp::QoS(1).reliable().transient_local();
+        preflight_sub_ = node_->create_subscription<std_msgs::msg::String>(
+            "/nav/preflight", qos,
+            [this](std_msgs::msg::String::SharedPtr msg) {
+                emit preflightReceived(QString::fromStdString(msg->data));
+            });
+    }
 
     layout->addStretch();
 }
@@ -177,6 +204,24 @@ void PerceptionPanel::onStartClicked(const QString& key)
 {
     Stack* s = stack(key);
     if (!s) return;
+    // Pre-flight gate: block Navigation start until the critical checks pass
+    // (scan/odom/tf/map). "blocked" hard-fails; anything else needs an explicit
+    // confirm if not fully "ready", so a stale/missing signal can still be
+    // overridden by a deliberate operator action.
+    if (key == "navigation" && preflight_overall_ != "ready") {
+        const QString detail = preflight_detail_.isEmpty()
+            ? QString("nav_preflight has not reported yet — is Localization running?")
+            : preflight_detail_;
+        if (preflight_overall_ == "blocked" || preflight_overall_.isEmpty()) {
+            QMessageBox box(QMessageBox::Warning, "Navigation blocked",
+                            "Navigation pre-flight is not satisfied:\n\n" + detail +
+                            "\n\nBring up Sensors → load a map → start Localization, "
+                            "and wait for scan/odom/tf/map to pass.\n\nStart Nav2 anyway?",
+                            QMessageBox::Yes | QMessageBox::No, this);
+            box.setDefaultButton(QMessageBox::No);
+            if (box.exec() != QMessageBox::Yes) return;
+        }
+    }
     if (!s->start_cli->service_is_ready()) {
         RCLCPP_WARN(node_->get_logger(),
                     "'%s' start requested but the service is unavailable "
@@ -218,6 +263,22 @@ void PerceptionPanel::onStackStatus(const QString& key, const QString& status)
     s->stop_btn->setEnabled(leading != "inactive");
 }
 
+void PerceptionPanel::onPreflight(const QString& status)
+{
+    // status is "<overall> (k=v …)"; the leading word drives readiness + color.
+    preflight_detail_ = status;
+    preflight_overall_ = status.section(' ', 0, 0);
+    const char* color = "#888";
+    if (preflight_overall_ == "ready")        color = "#33cc33";
+    else if (preflight_overall_ == "degraded") color = "#ccaa00";
+    else if (preflight_overall_ == "blocked")  color = "#cc6666";
+    if (preflight_label_) {
+        preflight_label_->setText("preflight: " + status);
+        preflight_label_->setStyleSheet(
+            QString("color: %1; font-size: 11px;").arg(color));
+    }
+}
+
 void PerceptionPanel::onOpenMap()
 {
     if (!map_window_)
@@ -238,8 +299,10 @@ void PerceptionPanel::onOpen3dMap()
 
 void PerceptionPanel::stopAllStacks()
 {
-    // Dependents first (localization + 3-D/2-D mapping consume the sensors), then sensors.
-    const char* order[] = {"localization", "mapping3d", "mapping", "i2c", "sensors"};
+    // Dependents first (navigation rides on localization; localization + 3-D/2-D
+    // mapping consume the sensors), then sensors.
+    const char* order[] = {"navigation", "localization", "mapping3d", "mapping",
+                           "i2c", "sensors"};
 
     auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
     std::vector<rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture> futures;

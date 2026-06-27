@@ -23,8 +23,9 @@ target and reports the state — so the GUI gets one-click control with no orpha
 | `jetson-sensors.service` | I2C sensors (MLX90640 thermal + LIS3MDL mag), one process owning the shared bus. On-demand (no `[Install]`). |
 | `rescue-mapping.service` | SLAM + odometry (`mapping_ekf.launch.py`, `use_rviz:=false`) — runs on the robot; the workstation only views `/map` over DDS. On-demand; needs the sensor stack up. Odometry source is switchable (EKF vs ZED-direct) via `ROBOCOREA_USE_EKF` — see [Odometry mode](#odometry-mode-prod-vs-bench). |
 | `rescue-mapping3d.service` | 3-D OctoMap (`rescue_mapping3d`) — builds an octree from the ZED cloud + TF on the robot; publishes only the compressed binary octree on `/robot/map3d` (latched, ~1 Hz). The raw cloud never leaves the Jetson. On-demand; needs sensors + mapping up. Also serves `/robot/map3d/{save,load}` (named `.bt` under `~/maps/<name>/`). |
-| `rescue-localization.service` | 2-D localization on a **saved** map (AMCL + map_server + Nav2 via `rescue_nav real_navigation.launch.py`). On-demand; (re)started by `map_manager` on a GUI map-load, reading the active map from `~/.config/rescue/active_map.env` (`MAP_DIR=~/maps/<name>`). Needs sensors + EKF up. Set the start pose from the GUI (click-drag → `/initialpose`). |
-| `robot-manager.service` | Always-on node managing **stacks**: exposes `/robot/<stack>/{start,stop,restart}` + `/robot/<stack>/status` for `sensors` (ZED+lidar), `i2c` (thermal+mag), `mapping` (SLAM+EKF), `mapping3d` (OctoMap) and `localization` (saved-map AMCL). |
+| `rescue-localization.service` | 2-D localization on a **saved** map — **localization only** (AMCL + map_server + EKF, **no Nav2**) via `rescue_nav real_navigation.launch.py nav:=false`. On-demand; (re)started by `map_manager` on a GUI map-load, reading the active map from `~/.config/rescue/active_map.env` (`MAP_DIR=~/maps/<name>`). Needs sensors up. Set the start pose from the GUI (click-drag → `/initialpose`). |
+| `rescue-navigation.service` | Nav2 navigation stack (planner + controller + BT + behaviors + smoother) via `rescue_nav nav2.launch.py` on the real-robot params. On-demand; started **explicitly** by the operator from the GUI **after** a map is loaded (localization up). Only publishes `/cmd_vel` — the robot moves only with the GUI **AUTO DRIVE** toggle on (`enable_cmd_vel_drive`). |
+| `robot-manager.service` | Always-on node managing **stacks**: exposes `/robot/<stack>/{start,stop,restart}` + `/robot/<stack>/status` for `sensors` (ZED+lidar), `i2c` (thermal+mag), `mapping` (SLAM+EKF), `mapping3d` (OctoMap), `localization` (saved-map AMCL) and `navigation` (Nav2). |
 | `map-manager.service` | Always-on node owning the **named map library** (`~/maps/<name>/`): `/robot/maps/{save,list,load,delete}`. 2-D save = `slam_toolbox serialize_map` + `nav2_map_server map_saver_cli`; 3-D save/load forwarded to `octomap_node`; 2-D load writes `active_map.env` + restarts `rescue-localization.service`. |
 
 Before deploying, check the marked lines in each unit:
@@ -73,8 +74,9 @@ systemctl --user daemon-reload
 # always-on managers (so the GUI can reach them) + sensor units enabled
 systemctl --user enable --now robot-manager.service map-manager.service
 systemctl --user enable zed.service lidar.service rescue-sensors.target
-# rescue-localization.service is on-demand (no enable) — map_manager starts it
-# on a GUI map-load. Maps live under ~/maps/<name>/ (created on first save).
+# rescue-localization.service + rescue-navigation.service are on-demand (no
+# enable): map_manager starts localization on a GUI map-load, and the operator
+# starts navigation from the GUI. Maps live under ~/maps/<name>/ (first save).
 ```
 
 ## Operate
@@ -102,7 +104,7 @@ ros2 service call /robot/maps/delete rescue_interfaces/srv/DeleteMap "{name: are
 ```
 
 …or just use the GUI **Robot Systems** window (toolbar icon next to ⚙): the
-**Perception** tab has the **Sensors / I2C / Mapping / 3D / Localization ▶ / ⏹**
+**Perception** tab has the **Sensors / I2C / Mapping / 3D / Localization / Navigation ▶ / ⏹**
 stack controls, and the **Maps** tab is the named map library (Load/Delete +
 previews). Map **save** + the click-drag **Set Start Pose** live on the map
 windows. Per-sensor **Thermal**/**Mag** enable toggles (gating

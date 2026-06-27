@@ -31,6 +31,7 @@ Sensor prerequisites (start FIRST, own terminals):
 Key args:
     map                       (REQUIRED for localization:=amcl) path to <map>.yaml
     localization   (amcl)     'amcl' | 'slam_toolbox'
+    nav            (true)     include Nav2; false = localization-only (no Nav2)
     params_file               nav2_real_params.yaml (AMCL + map_server + Nav2)
     slam_map_file             posegraph basename (no ext) for slam_toolbox path
     use_sim_time   (false)
@@ -136,15 +137,21 @@ def _setup(context, *args, **kwargs):
         ))
 
     # 4) Nav2 navigation stack — controller/planner/BT/smoother -> /cmd_vel.
-    actions.append(IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(nav2_bringup, 'launch', 'navigation_launch.py')),
-        launch_arguments={
-            'use_sim_time': use_sim_time,
-            'params_file': params_file,
-            'autostart': 'true',
-        }.items(),
-    ))
+    #    Gated by 'nav' so this launch can run LOCALIZATION-ONLY (nav:=false):
+    #    rescue-localization.service uses that to localize on a loaded map without
+    #    bringing Nav2 up; rescue-navigation.service starts Nav2 separately on top
+    #    (nav2.launch.py) when the operator explicitly starts the Navigation stack.
+    include_nav = LaunchConfiguration('nav').perform(context).lower() == 'true'
+    if include_nav:
+        actions.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(nav2_bringup, 'launch', 'navigation_launch.py')),
+            launch_arguments={
+                'use_sim_time': use_sim_time,
+                'params_file': params_file,
+                'autostart': 'true',
+            }.items(),
+        ))
 
     # 5) One-shot initial pose for AMCL (after it activates). Skipped for
     #    slam_toolbox (which relocalizes from map_start_pose / scan matching).
@@ -165,7 +172,25 @@ def _setup(context, *args, **kwargs):
         # Published once, delayed so AMCL has activated and is listening.
         actions.append(TimerAction(period=6.0, actions=[_initialpose_proc(pose_msg)]))
 
-    # 6) RViz (optional).
+    # 6) Pre-flight validator. Runs with localization (nav:=false) too, so the GUI
+    #    has a readiness signal the moment a map is loaded — BEFORE Nav2 is started.
+    #    Publishes /nav/preflight (latched) + serves /nav/preflight_check (Trigger).
+    if LaunchConfiguration('preflight').perform(context).lower() == 'true':
+        actions.append(Node(
+            package='rescue_nav', executable='nav_preflight', name='nav_preflight',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'scan_topic': '/scan_flat',
+                'odom_topic': '/odometry/filtered',
+                'cmd_vel_topic': '/cmd_vel',
+                'map_topic': '/map',
+                'global_frame': 'map',
+                'laser_frame': 'base_laser',
+            }],
+        ))
+
+    # 7) RViz (optional).
     actions.append(Node(
         condition=IfCondition(use_rviz),
         package='rviz2', executable='rviz2', name='rviz2',
@@ -209,6 +234,16 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'odom_tf_owner', default_value='ekf',
             description="'ekf' (fused, default) | 'zed' (ZED-only, no EKF)."),
+        DeclareLaunchArgument(
+            'nav', default_value='true',
+            description="Include the Nav2 navigation stack. Set false for "
+                        "LOCALIZATION-ONLY (map_server+AMCL+EKF, no Nav2) — used by "
+                        "rescue-localization.service; rescue-navigation.service then "
+                        "runs Nav2 on top via nav2.launch.py."),
+        DeclareLaunchArgument(
+            'preflight', default_value='true',
+            description='Run the nav_preflight readiness validator '
+                        '(/nav/preflight + /nav/preflight_check).'),
         DeclareLaunchArgument('set_initial_pose', default_value='true'),
         DeclareLaunchArgument('initial_pose_x', default_value='0.0'),
         DeclareLaunchArgument('initial_pose_y', default_value='0.0'),

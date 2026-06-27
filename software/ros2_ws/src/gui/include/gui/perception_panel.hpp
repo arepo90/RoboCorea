@@ -9,14 +9,20 @@
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
-// Perception / mapping stack controls — moved out of the (cluttered) dashboard
-// into the Robot Systems window. Manages the four robot_manager-driven stacks on
-// the Jetson (start/stop over std_srvs/Trigger, live LED from /robot/<name>/status):
+// Perception / mapping / navigation stack controls — moved out of the (cluttered)
+// dashboard into the Robot Systems window. Manages the robot_manager-driven stacks
+// on the Jetson (start/stop over std_srvs/Trigger, live LED from
+// /robot/<name>/status):
 //
-//   sensors    ZED + RPLidar          (rescue-sensors.target)
-//   i2c        MLX90640 + LIS3MDL      (jetson-sensors.service)
-//   mapping    slam_toolbox + EKF      (rescue-mapping.service)   + Open 2D map
-//   mapping3d  OctoMap                 (rescue-mapping3d.service) + Open 3D map
+//   sensors      ZED + RPLidar             (rescue-sensors.target)
+//   i2c          MLX90640 + LIS3MDL        (jetson-sensors.service)
+//   mapping      slam_toolbox + EKF        (rescue-mapping.service)    + Open 2D map
+//   mapping3d    OctoMap                   (rescue-mapping3d.service)  + Open 3D map
+//   localization AMCL + map_server + EKF   (rescue-localization.service)
+//   navigation   Nav2 (planner/ctrl/BT)    (rescue-navigation.service)
+//
+// The Navigation start is gated by nav_preflight readiness (/nav/preflight): the
+// critical scan/odom/tf/map checks must pass before Nav2 will be started.
 //
 // The per-sensor enable toggles (mag/thermal /sensors/enable_mask) stay on the
 // dashboard with their readouts — only the stack lifecycle lives here.
@@ -36,11 +42,14 @@ public:
 signals:
     // ROS thread → Qt thread: (stack key, status string).
     void stackStatusReceived(const QString& key, const QString& status);
+    // ROS thread → Qt thread: nav_preflight readiness ("<overall> (k=v …)").
+    void preflightReceived(const QString& status);
 
 private slots:
     void onStartClicked(const QString& key);
     void onStopClicked(const QString& key);
     void onStackStatus(const QString& key, const QString& status);
+    void onPreflight(const QString& status);   // /nav/preflight readout
     void onOpenMap();      // 2-D MapWindow (lazy)
     void onOpen3dMap();    // 3-D MapWindow (lazy)
 
@@ -70,4 +79,10 @@ private:
     QPushButton* open_3dmap_btn_{nullptr};
     MapWindow*   map_window_{nullptr};
     MapWindow*   map3d_window_{nullptr};
+
+    // nav_preflight readiness (gates the Navigation start; see onStartClicked).
+    QLabel*      preflight_label_{nullptr};
+    QString      preflight_overall_;   // "ready" | "degraded" | "blocked" | ""
+    QString      preflight_detail_;    // full "<overall> (k=v …)" string
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr preflight_sub_;
 };

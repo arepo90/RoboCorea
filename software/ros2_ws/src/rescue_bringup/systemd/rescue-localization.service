@@ -1,11 +1,15 @@
 [Unit]
-Description=RoboCorea 2-D localization on a saved map (AMCL + map_server + Nav2)
+Description=RoboCorea 2-D localization on a saved map (AMCL + map_server + EKF)
 # On-demand, (re)started by map_manager when the operator loads a named map. The
 # map to localize on comes from the active-map env file that map_manager writes
 # (MAP_DIR points at ~/maps/<name>); the unit localizes on $MAP_DIR/occ.yaml.
-# Needs the sensor stack (rescue-sensors.target) + EKF up so /scan and the
-# odom->base_footprint TF exist. Set the start pose from the GUI (click-drag on
-# the 2-D map -> /initialpose).
+# Needs the sensor stack (rescue-sensors.target) up so /scan and /zed odom exist
+# (this unit brings up the EKF + sensor frontend itself). Set the start pose from
+# the GUI (click-drag on the 2-D map -> /initialpose).
+#
+# LOCALIZATION ONLY (nav:=false): this unit does NOT start Nav2. The operator
+# brings Nav2 up separately via the Navigation stack (rescue-navigation.service),
+# so loading a map localizes the robot without silently enabling autonomy.
 
 [Service]
 # Must match the workstation/GUI domain.
@@ -13,11 +17,10 @@ Environment=ROS_DOMAIN_ID=20
 # Written by map_manager on /robot/maps/load (2d|both). '-' => tolerate absence
 # (the unit then fails fast with a clear "map not set" rather than starting blind).
 EnvironmentFile=-%h/.config/rescue/active_map.env
-# Reuses rescue_nav's known-map workflow (localization + Nav2). set_initial_pose
-# is false: the operator places the robot via the GUI. Adjust the workspace path
-# if yours differs. Can be slimmed to localization-only (map_server + AMCL +
-# lifecycle) later if Nav2 is unwanted while just localizing.
-ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && test -n "${MAP_DIR}" || { echo "no active map (MAP_DIR unset) — load a map from the GUI"; exit 1; } && exec ros2 launch rescue_nav real_navigation.launch.py map:=${MAP_DIR}/occ.yaml use_rviz:=false set_initial_pose:=false'
+# Reuses rescue_nav's known-map workflow in LOCALIZATION-ONLY mode (nav:=false →
+# map_server + AMCL + EKF, no Nav2). set_initial_pose is false: the operator places
+# the robot via the GUI. Adjust the workspace path if yours differs.
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && test -n "${MAP_DIR}" || { echo "no active map (MAP_DIR unset) — load a map from the GUI"; exit 1; } && exec ros2 launch rescue_nav real_navigation.launch.py map:=${MAP_DIR}/occ.yaml use_rviz:=false set_initial_pose:=false nav:=false'
 KillSignal=SIGINT
 KillMode=control-group
 TimeoutStopSec=15

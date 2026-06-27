@@ -153,6 +153,26 @@ bridge's input topic are both `/cmd_vel`. If you must isolate Nav2's output (e.g
 to insert a safety mux), remap `velocity_smoother`'s output and point the bridge
 at the muxed topic.
 
+## Pre-flight readiness (GUI-driven flow)
+
+When navigation is driven from the GUI (robot_manager stacks, not the CLI above),
+the split is: **Localization** stack = `real_navigation.launch.py nav:=false`
+(map_server + AMCL + EKF + the `nav_preflight` validator), and a separate
+**Navigation** stack = `nav2.launch.py` (Nav2 only). Load a map → start
+Localization → start Navigation.
+
+`nav_preflight` (runs with Localization) reports readiness on `/nav/preflight`
+(latched) and serves `/nav/preflight_check` (`std_srvs/Trigger`). The CRITICAL
+checks (`scan`/`odom`/`tf`/`map`) must pass before Nav2 is started — the GUI
+**blocks** the Navigation start until they do.
+
+```bash
+ros2 topic echo /nav/preflight --once          # "ready|degraded|blocked (scan=ok …)"
+ros2 service call /nav/preflight_check std_srvs/srv/Trigger "{}"
+```
+`degraded` = perception is healthy (safe to start Nav2) but Nav2 / AUTO DRIVE are
+not up yet; `ready` = everything (incl. Nav2 + AUTO DRIVE) is live.
+
 ## Quick lifecycle / health checks
 
 ```bash
