@@ -54,6 +54,7 @@ signals:
     void imuUpdated(double yaw, double pitch, double roll);
     void telemetryReceived();   // heartbeat
     void uptimeUpdated(float uptime_s);
+    void batteryUpdated(double volts);   // pack voltage (any VESC V_in)
     // Arm lifecycle (ROS thread → Qt thread).
     void armStateUpdated(const QString& state);
     void armModeUpdated(const QString& mode);
@@ -76,6 +77,7 @@ private slots:
     void onTelemetryReceived();
     void onHeartbeatCheck();
     void onUptimeUpdated(float uptime_s);
+    void onBatteryUpdated(double volts);
     void onClearAll();
     void publishEstopState();
     void onSensorToggled();
@@ -101,11 +103,13 @@ private:
     QLabel*             conn_indicator_;
     QLabel*             conn_label_;
     QLabel*             uptime_label_;
+    QLabel*             battery_label_;   // 6S LiPo pack voltage, color-coded
     QTimer*             heartbeat_timer_;
     QPropertyAnimation* pulse_anim_{nullptr};
     bool                hb_received_{false};
     int                 hb_miss_count_{3};
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr telemetry_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr vesc_sub_;
 
     // Magnetometer
     QLabel* mag_x_;

@@ -26,6 +26,15 @@ static int vescIdToSlot(int can_id) {
 
 static const char* ARM_NAMES[7]  = {"?", "J1", "J2", "J3", "J4", "J5", "J6"};
 
+// ODrive J1–J3 report RAW MOTOR turns over CAN (firmware OdriveStatusPayload.
+// pos_turns_100); the reduction + sign are NOT applied there. Convert to true
+// output degrees here so the readout matches the commanded joint angle, mirroring
+// the firmware command path (config.h ODRIVE_GEAR_J*/ODRIVE_DIR_J*). J4/J5/J6
+// already arrive as output degrees from the bridge. (ZE300 is firmware-zeroed;
+// ODrive/LKTech are not, so onArmJointUpdated re-zeros all six at arm time.)
+static constexpr double ODRIVE_GEAR = 48.0;
+static constexpr double ODRIVE_DIR  = -1.0;
+
 OdometryPanel::OdometryPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     : QWidget(parent), node_(node)
 {
@@ -46,6 +55,10 @@ OdometryPanel::OdometryPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
             this, &OdometryPanel::onVescStatusUpdated, Qt::QueuedConnection);
     connect(this, &OdometryPanel::armJointUpdated,
             this, &OdometryPanel::onArmJointUpdated, Qt::QueuedConnection);
+    connect(this, &OdometryPanel::armStateUpdated,
+            this, &OdometryPanel::onArmStateUpdated, Qt::QueuedConnection);
+
+    arm_need_zero_.fill(true);   // capture each joint's display zero on first sample
 
     auto qos = rclcpp::QoS(10).best_effort();
 
@@ -85,26 +98,27 @@ OdometryPanel::OdometryPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
             emit flagsUpdated(static_cast<int>(msg->data));
         });
 
-    // VESC: [id, erpm, current_A, duty, temp_fet, temp_motor, voltage]
+    // VESC: [id, erpm, current_A, duty, temp_fet, temp_motor, voltage, tacho].
+    // Temperatures (data[4]/data[5]) are intentionally not surfaced here.
     vesc_sub_ = node_->create_subscription<std_msgs::msg::Float32MultiArray>(
         "/motors/vesc_status", qos,
         [this](std_msgs::msg::Float32MultiArray::SharedPtr msg) {
             if (msg->data.size() >= 7)
                 emit vescStatusUpdated(static_cast<int>(msg->data[0]),
-                                       msg->data[1], msg->data[2], msg->data[3],
-                                       msg->data[4], msg->data[5]);
+                                       msg->data[1], msg->data[2], msg->data[3]);
         });
 
-    // Arm telemetry → unified armJointUpdated(joint 1-6, angle°, secondary, unit).
-    // NOTE: joint-index mapping is assumed from the bridge field order; verify
-    // against the firmware once the arm is on the bench (architecture.md §8).
-    // ODrive J1-3: [joint, pos_turns, vel, iq_A, busV, busA]
+    // Arm telemetry → unified armJointUpdated(joint 1-6, output°, current_A). The
+    // angle is the gear-reduced, re-zeroed output angle (see onArmJointUpdated);
+    // the secondary readout is the motor current (Iq), not temperature.
+    // ODrive J1-3: [joint, pos_turns(motor), vel, iq_A, busV, busA]
     odrive_sub_ = node_->create_subscription<std_msgs::msg::Float32MultiArray>(
         "/motors/odrive_status", qos,
         [this](std_msgs::msg::Float32MultiArray::SharedPtr msg) {
             if (msg->data.size() >= 6) {
                 int joint = static_cast<int>(msg->data[0]) + 1;  // 0-based → J1..J3
-                emit armJointUpdated(joint, msg->data[1] * 360.0, msg->data[3], "A");
+                double out_deg = msg->data[1] * 360.0 / ODRIVE_GEAR * ODRIVE_DIR;
+                emit armJointUpdated(joint, out_deg, msg->data[3]);
             }
         });
     // ZE300 J4: [id, temp_C, iq_A, rpm, single_turn, pos_counts, out_deg]
@@ -112,7 +126,7 @@ OdometryPanel::OdometryPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         "/motors/ze300_status", qos,
         [this](std_msgs::msg::Float32MultiArray::SharedPtr msg) {
             if (msg->data.size() >= 7)
-                emit armJointUpdated(4, msg->data[6], msg->data[1], "°C");
+                emit armJointUpdated(4, msg->data[6], msg->data[2]);
         });
     // LKTech J5-6: [joint, motor_id, temp_C, iq_A, dps, angle, out_deg]
     lktech_sub_ = node_->create_subscription<std_msgs::msg::Float32MultiArray>(
@@ -121,8 +135,16 @@ OdometryPanel::OdometryPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
             if (msg->data.size() >= 7) {
                 int motor_id = static_cast<int>(msg->data[1]);
                 int joint = (motor_id == 15) ? 6 : 5;  // 14→J5, 15→J6
-                emit armJointUpdated(joint, msg->data[6], msg->data[2], "°C");
+                emit armJointUpdated(joint, msg->data[6], msg->data[3]);
             }
+        });
+
+    // Re-zero the displayed angles whenever the arm (re)arms: the firmware captures
+    // each joint's boot-pose zero at arm time, so READY is when "0 = current pose".
+    arm_state_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/arm/state", rclcpp::QoS(1).reliable().transient_local(),
+        [this](std_msgs::msg::String::SharedPtr msg) {
+            emit armStateUpdated(QString::fromStdString(msg->data));
         });
 }
 
@@ -213,8 +235,6 @@ void OdometryPanel::buildLayout()
         hdr->addWidget(makeAxisLabel("eRPM"), 0, 1);
         hdr->addWidget(makeAxisLabel("A"),    0, 2);
         hdr->addWidget(makeAxisLabel("Duty"), 0, 3);
-        hdr->addWidget(makeAxisLabel("Tfet"), 0, 4);
-        hdr->addWidget(makeAxisLabel("Tmot"), 0, 5);
         main_layout_->addLayout(hdr);
 
         for (int id = 1; id <= 6; ++id) {
@@ -226,17 +246,12 @@ void OdometryPanel::buildLayout()
             vesc_rows_[id].erpm       = makeValueLabel("--");
             vesc_rows_[id].current    = makeValueLabel("--");
             vesc_rows_[id].duty       = makeValueLabel("--");
-            vesc_rows_[id].temp_fet   = makeValueLabel("--");
-            vesc_rows_[id].temp_motor = makeValueLabel("--");
             for (QLabel* l : {vesc_rows_[id].erpm, vesc_rows_[id].current,
-                              vesc_rows_[id].duty, vesc_rows_[id].temp_fet,
-                              vesc_rows_[id].temp_motor})
+                              vesc_rows_[id].duty})
                 l->setStyleSheet("color: #4fc3f7; font-size: 10px;");
             row->addWidget(vesc_rows_[id].erpm,       0, 1);
             row->addWidget(vesc_rows_[id].current,    0, 2);
             row->addWidget(vesc_rows_[id].duty,       0, 3);
-            row->addWidget(vesc_rows_[id].temp_fet,   0, 4);
-            row->addWidget(vesc_rows_[id].temp_motor, 0, 5);
             main_layout_->addLayout(row);
         }
     }
@@ -250,19 +265,19 @@ void OdometryPanel::buildLayout()
         hdr->setSpacing(2);
         hdr->addWidget(makeAxisLabel("Joint"), 0, 0);
         hdr->addWidget(makeAxisLabel("Angle"), 0, 1);
-        hdr->addWidget(makeAxisLabel("Iq/T"),  0, 2);
+        hdr->addWidget(makeAxisLabel("Iq (A)"), 0, 2);
         main_layout_->addLayout(hdr);
 
         for (int j = 1; j <= 6; ++j) {
             auto* row = new QGridLayout();
             row->setSpacing(2);
             row->addWidget(makeAxisLabel(ARM_NAMES[j]), 0, 0);
-            arm_rows_[j].angle     = makeValueLabel("--");
-            arm_rows_[j].secondary = makeValueLabel("--");
-            for (QLabel* l : {arm_rows_[j].angle, arm_rows_[j].secondary})
+            arm_rows_[j].angle   = makeValueLabel("--");
+            arm_rows_[j].current = makeValueLabel("--");
+            for (QLabel* l : {arm_rows_[j].angle, arm_rows_[j].current})
                 l->setStyleSheet("color: #4fc3f7; font-size: 10px;");
-            row->addWidget(arm_rows_[j].angle,     0, 1);
-            row->addWidget(arm_rows_[j].secondary, 0, 2);
+            row->addWidget(arm_rows_[j].angle,   0, 1);
+            row->addWidget(arm_rows_[j].current, 0, 2);
             main_layout_->addLayout(row);
         }
     }
@@ -348,8 +363,7 @@ void OdometryPanel::onFlagsUpdated(int flags)
     flags_label_->setText(parts.isEmpty() ? "none" : parts.join(" | "));
 }
 
-void OdometryPanel::onVescStatusUpdated(int id, float erpm, float current, float duty,
-                                        float temp_fet, float temp_motor)
+void OdometryPanel::onVescStatusUpdated(int id, float erpm, float current, float duty)
 {
     // `id` is the raw VESC CAN id (60/50/20/10/40/30), not a 1..6 row index — map
     // it to the right table slot. Unknown ids (not one of the six VESCs) are dropped.
@@ -359,14 +373,48 @@ void OdometryPanel::onVescStatusUpdated(int id, float erpm, float current, float
     row.erpm->setText(QString::number(static_cast<int>(erpm)));
     row.current->setText(QString::number(current, 'f', 1) + "A");
     row.duty->setText(QString::number(duty * 100.0f, 'f', 0) + "%");
-    row.temp_fet->setText(QString::number(temp_fet, 'f', 0) + "°");
-    row.temp_motor->setText(QString::number(temp_motor, 'f', 0) + "°");
 }
 
-void OdometryPanel::onArmJointUpdated(int joint, double angle_deg, double secondary,
-                                      const QString& sec_unit)
+void OdometryPanel::onArmJointUpdated(int joint, double angle_deg, double current_a)
 {
     if (joint < 1 || joint > 6) return;
-    arm_rows_[joint].angle->setText(QString::number(angle_deg, 'f', 1) + "°");
-    arm_rows_[joint].secondary->setText(QString::number(secondary, 'f', 1) + sec_unit);
+
+    double angle = angle_deg;
+    // J5/J6 (LKTech) report single-turn motor angle ÷ 10:1 gear, wrapping every 36°
+    // of output. Unwrap incrementally (samples are dense while servoing) so the
+    // readout follows the full ±90° travel. ODrive/ZE300 are already multi-turn.
+    if (joint == 5 || joint == 6) {
+        constexpr double PERIOD = 360.0 / 10.0;   // output-deg per motor revolution
+        if (arm_unwrap_started_[joint]) {
+            double d = angle - arm_prev_raw_[joint];
+            if (d >  PERIOD / 2.0)      arm_unwrap_accum_[joint] -= PERIOD;
+            else if (d < -PERIOD / 2.0) arm_unwrap_accum_[joint] += PERIOD;
+        } else {
+            arm_unwrap_started_[joint] = true;
+        }
+        arm_prev_raw_[joint] = angle;
+        angle += arm_unwrap_accum_[joint];
+    }
+
+    // ODrive/LKTech telemetry isn't zeroed in firmware (and ODrive arrives in motor
+    // turns, gear-converted before this point), so snapshot a display zero on the
+    // first sample / each arm so the angle reads ~0 at the captured boot pose.
+    if (arm_need_zero_[joint]) {
+        arm_zero_[joint] = angle;
+        arm_need_zero_[joint] = false;
+    }
+    arm_rows_[joint].angle->setText(QString::number(angle - arm_zero_[joint], 'f', 1) + "°");
+    arm_rows_[joint].current->setText(QString::number(current_a, 'f', 1) + "A");
+}
+
+void OdometryPanel::onArmStateUpdated(const QString& state)
+{
+    // On (re)arm the firmware recaptures each joint's boot-pose zero; recapture the
+    // display zeros (and reset the J5/J6 unwrap) so the readout snaps back to 0 at
+    // the new ready pose.
+    if (state == "READY") {
+        arm_need_zero_.fill(true);
+        arm_unwrap_started_.fill(false);
+        arm_unwrap_accum_.fill(0.0);
+    }
 }

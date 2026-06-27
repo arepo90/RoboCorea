@@ -39,10 +39,20 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     conn_label_->setStyleSheet(lbl_style);
     uptime_label_ = new QLabel("--", this);
     uptime_label_->setStyleSheet("color: #4fc3f7; font-size: 12px;");
+    // Battery: 6S LiPo pack voltage, sourced from any VESC's V_in (everything
+    // shares the one pack). Color-coded by per-cell voltage in onBatteryUpdated.
+    battery_label_ = new QLabel("--", this);
+    battery_label_->setToolTip("Battery pack voltage (6S LiPo, from VESC V_in)");
+    battery_label_->setStyleSheet("color: #4fc3f7; font-size: 12px;");
+    auto* conn_vsep = new QFrame(this);
+    conn_vsep->setFrameShape(QFrame::VLine);
+    conn_vsep->setStyleSheet("color: #444;");
     conn_row->addStretch();
     conn_row->addWidget(conn_indicator_);
     conn_row->addWidget(conn_label_);
     conn_row->addWidget(uptime_label_);
+    conn_row->addWidget(conn_vsep);
+    conn_row->addWidget(battery_label_);
     conn_row->addStretch();
     layout->addLayout(conn_row);
 
@@ -195,6 +205,8 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
             this, &DashboardPanel::onTelemetryReceived, Qt::QueuedConnection);
     connect(this, &DashboardPanel::uptimeUpdated,
             this, &DashboardPanel::onUptimeUpdated, Qt::QueuedConnection);
+    connect(this, &DashboardPanel::batteryUpdated,
+            this, &DashboardPanel::onBatteryUpdated, Qt::QueuedConnection);
 
     auto sensor_qos = rclcpp::QoS(10).best_effort();
 
@@ -238,6 +250,16 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
             emit telemetryReceived();
             if (msg->data.size() >= 4)
                 emit uptimeUpdated(msg->data[3]);
+        });
+
+    // Battery: any VESC's V_in (index 6) — they all sit on the one 6S pack.
+    // [id, erpm, current_A, duty, temp_fet, temp_motor, voltage, tacho]. Ignore
+    // obviously-invalid readings (a VESC that hasn't reported V_in yet sends 0).
+    vesc_sub_ = node_->create_subscription<std_msgs::msg::Float32MultiArray>(
+        "/motors/vesc_status", sensor_qos,
+        [this](std_msgs::msg::Float32MultiArray::SharedPtr msg) {
+            if (msg->data.size() >= 7 && msg->data[6] > 6.0f)
+                emit batteryUpdated(msg->data[6]);
         });
 
     heartbeat_timer_ = new QTimer(this);
@@ -514,6 +536,22 @@ void DashboardPanel::onUptimeUpdated(float uptime_s)
     uptime_label_->setText(text);
 }
 
+void DashboardPanel::onBatteryUpdated(double volts)
+{
+    // 6S LiPo: color by per-cell voltage. ~4.2 V/cell full (25.2 V), 3.7 nominal
+    // (22.2 V), ~3.3-3.5 should-land-now, 3.0 hard floor (18 V). Thresholds are
+    // per-cell so they read the same regardless of the 6S pack arithmetic.
+    const double cell = volts / 6.0;
+    QString color;
+    if      (cell >= 3.80) color = "#33cc33";   // green  — healthy
+    else if (cell >= 3.60) color = "#cccc33";   // yellow — getting there
+    else if (cell >= 3.40) color = "#ff8800";   // orange — land soon
+    else                   color = "#cc3333";   // red    — critical
+    battery_label_->setText(QString::number(volts, 'f', 1) + "V");
+    battery_label_->setStyleSheet(
+        QString("color: %1; font-size: 12px; font-weight: bold;").arg(color));
+}
+
 void DashboardPanel::onHeartbeatCheck()
 {
     if (hb_received_) {
@@ -527,6 +565,8 @@ void DashboardPanel::onHeartbeatCheck()
     } else if (hb_miss_count_ >= 2) {
         setConnState("#cc3333", "Offline");
         uptime_label_->setText("--");
+        battery_label_->setText("--");
+        battery_label_->setStyleSheet("color: #4fc3f7; font-size: 12px;");
     }
 }
 

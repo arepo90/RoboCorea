@@ -31,10 +31,9 @@ signals:
     void flipperExtUpdated(float fl, float fr, float rl, float rr);
     void modeUpdated(const QString& mode);
     void flagsUpdated(int flags);
-    void vescStatusUpdated(int id, float erpm, float current, float duty,
-                           float temp_fet, float temp_motor);
-    void armJointUpdated(int joint, double angle_deg, double secondary,
-                         const QString& sec_unit);
+    void vescStatusUpdated(int id, float erpm, float current, float duty);
+    void armJointUpdated(int joint, double angle_deg, double current_a);
+    void armStateUpdated(const QString& state);
 
 private slots:
     void onTracksUpdated(double left_rpm, double right_rpm);
@@ -42,10 +41,9 @@ private slots:
     void onFlipperExtUpdated(float fl, float fr, float rl, float rr);
     void onModeUpdated(const QString& mode);
     void onFlagsUpdated(int flags);
-    void onVescStatusUpdated(int id, float erpm, float current, float duty,
-                             float temp_fet, float temp_motor);
-    void onArmJointUpdated(int joint, double angle_deg, double secondary,
-                           const QString& sec_unit);
+    void onVescStatusUpdated(int id, float erpm, float current, float duty);
+    void onArmJointUpdated(int joint, double angle_deg, double current_a);
+    void onArmStateUpdated(const QString& state);
 
 private:
     void buildLayout();
@@ -82,17 +80,27 @@ private:
         QLabel* erpm;
         QLabel* current;
         QLabel* duty;
-        QLabel* temp_fet;
-        QLabel* temp_motor;
     };
     std::array<VescRow, 7> vesc_rows_{};
 
-    // Arm table (J1-J6; index 0 unused)
+    // Arm table (J1-J6; index 0 unused). Angle is shown in true output degrees,
+    // re-zeroed at each arm so it reads ~0 at the boot/ready pose; current (Iq)
+    // replaces the per-controller temperatures.
     struct ArmRow {
         QLabel* angle;
-        QLabel* secondary;
+        QLabel* current;
     };
     std::array<ArmRow, 7> arm_rows_{};
+    // Per-joint display zero (output deg) + "capture the next sample" flags. Set
+    // on /arm/state==READY so the angles read 0 at the freshly-captured boot pose.
+    std::array<double, 7> arm_zero_{};
+    std::array<bool, 7>   arm_need_zero_{};
+    // J5/J6 (LKTech) telemetry is single-turn motor angle ÷ gear, so it wraps every
+    // 36° of output. These track the previous raw sample + accumulated wrap offset so
+    // the readout follows the full travel instead of cycling 0→36→0.
+    std::array<double, 7> arm_prev_raw_{};
+    std::array<double, 7> arm_unwrap_accum_{};
+    std::array<bool, 7>   arm_unwrap_started_{};
 
     rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr tracks_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_sub_;
@@ -103,4 +111,5 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr odrive_sub_;
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr ze300_sub_;
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr lktech_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr arm_state_sub_;
 };
