@@ -28,9 +28,11 @@ class SpeechProcessor;
 //
 // RoboCorea changes vs legacy: no gas sensor; no ESP32 IMU (orientation comes
 // from the ZED2 camera, so it has no enable toggle). The magnetometer and thermal
-// camera are Jetson I2C nodes that honor /sensors/enable_mask: bit0 mag, bit1
-// thermal (driven by the video panel's thermal selection, not a button). Audio is
-// the Opus track demuxed from the C920 A/V stream, not a ROS topic.
+// camera now live on the arm PCB (read by the arm ESP32, relayed by esp32_bridge)
+// and honor /sensors/enable_mask: bit0 mag, bit1 thermal (driven by the video
+// panel's thermal selection, not a button). The mask is unchanged — the bridge
+// forwards it down as MSG_SENSOR_ENABLE. Audio is the Opus track demuxed from the
+// C920 A/V stream, not a ROS topic.
 class DashboardPanel : public QWidget {
     Q_OBJECT
 public:
@@ -175,8 +177,8 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_chassis_cli_;
 
     // ── Thermal acquisition enable (/sensors/enable_mask bit1) ────────────────
-    // The dashboard owns the enable mask; the I2C *driver* lifecycle lives in the
-    // Robot Systems window now. Also auto-driven by the video panel's thermal
-    // source selection (setThermalEnabled).
+    // The dashboard owns the enable mask; esp32_bridge relays it to the arm PCB
+    // (MSG_SENSOR_ENABLE). Also auto-driven by the video panel's thermal source
+    // selection (setThermalEnabled).
     QPushButton* thermal_toggle_{nullptr};   // /sensors/enable_mask bit1
 };

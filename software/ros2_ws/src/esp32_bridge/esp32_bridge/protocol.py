@@ -16,7 +16,8 @@ ROLE_NAMES = {
 }
 
 MSG_TELEMETRY = 0x01
-MSG_MAG = 0x03  # reserved legacy path; LIS3MDL now publishes from jetson_sensors
+MSG_SENSOR_THERMAL = 0x02  # ARM PCB: MLX90640 frame (seq + min/max + 768 quantised px)
+MSG_MAG = 0x03  # ARM PCB: LIS3MDL XYZ (int16 µT)
 MSG_STATUS = 0x05
 MSG_ENCODER_EXT = 0x07
 MSG_VESC_STATUS = 0x08
@@ -28,7 +29,7 @@ MSG_ARM_LIFECYCLE = 0x0E
 MSG_BOARD_IDENTITY = 0x0F
 
 MSG_ARM_JOINTS = 0x10
-MSG_SENSOR_ENABLE = 0x11  # reserved legacy path; /sensors/enable_mask stays on Jetson
+MSG_SENSOR_ENABLE = 0x11  # PC→ARM: 1-byte mask (bit0 mag, bit1 thermal) for the arm-PCB sensors
 MSG_ESTOP = 0x12
 MSG_ESTOP_CLEAR = 0x13
 MSG_KEYBIND = 0x14
@@ -42,9 +43,10 @@ MSG_TRACTION_CMD = 0x1A  # 2×int16 normalised L/R track speed ×1000 + u8 enabl
 CAP_CHASSIS_IO = 1 << 0
 CAP_ARM_IO = 1 << 1
 CAP_RC_PPM = 1 << 2
-CAP_MAG = 1 << 3  # reserved legacy capability bit
+CAP_MAG = 1 << 3  # LIS3MDL on the ARM PCB I2C bus
 CAP_VESC_BASE = 1 << 4
 CAP_ARM_CAN = 1 << 5
+CAP_THERMAL = 1 << 6  # MLX90640 on the ARM PCB I2C bus
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,35 @@ def build_traction_cmd(left_norm: float, right_norm: float, enable: bool) -> byt
     right = max(-1000, min(1000, int(round(right_norm * 1000.0))))
     payload = struct.pack('<hhB', left, right, 1 if enable else 0)
     return build_frame(MSG_TRACTION_CMD, payload)
+
+
+THERMAL_COLS = 32
+THERMAL_ROWS = 24
+THERMAL_PIXELS = THERMAL_COLS * THERMAL_ROWS
+# ThermalFramePayload header: seq u16, min_c100 i16, max_c100 i16, cols u8, rows u8.
+_THERMAL_HEADER = struct.Struct('<HhhBB')
+
+
+def build_sensor_enable(mask: int) -> bytes:
+    """PC→ARM sensor enable mask (MSG_SENSOR_ENABLE): bit0 mag, bit1 thermal."""
+    return build_frame(MSG_SENSOR_ENABLE, bytes([int(mask) & 0xFF]))
+
+
+def parse_thermal_header(payload: bytes):
+    """Split a MSG_SENSOR_THERMAL payload into (seq, min_c, max_c, cols, rows, q).
+
+    `q` is the raw quantised pixel block (one byte/pixel, row-major). Dequantise
+    with  celsius = min_c + (q / 255) * (max_c - min_c).
+    """
+    hdr = _THERMAL_HEADER.size
+    if len(payload) < hdr:
+        raise struct.error('thermal payload too short')
+    seq, min_c100, max_c100, cols, rows = _THERMAL_HEADER.unpack_from(payload)
+    npix = cols * rows
+    q = payload[hdr:hdr + npix]
+    if len(q) < npix:
+        raise struct.error('thermal payload pixel count mismatch')
+    return seq, min_c100 / 100.0, max_c100 / 100.0, cols, rows, q
 
 
 def parse_identity(payload: bytes) -> BoardIdentity:

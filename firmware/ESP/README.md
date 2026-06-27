@@ -21,7 +21,7 @@ For the whole-system picture see [`../../reference/architecture.md`](../../refer
 | **Flippers** | 4 VESCs. The **position loop runs on the VESC** (LispBM — see [`../VESC/flipper_position.lisp`](../VESC/flipper_position.lisp)). The ESP integrates the stick into a target angle, sends it through the fake-RPM carrier, and reports measured `[FL, FR, RL, RR]` angles from STATUS_5 tachometer feedback. Center stick = hold; no separate encoders. |
 | **Arm relay** | Arm-role firmware relays workstation joint commands (gamepad → IK) to CAN whenever armed & not e-stopped: ODrive J1–J3, ZE300 J4, LKTech J5–J6. |
 | **Arm operating mode** | Dexterity controls J1–J6. Chassis/transport keeps J1–J4 controlled and sends LKTech J5/J6 to motor-stop (torque-off). |
-| **Sensors** | No passive sensors live on the ESP32 in the normal robot build. The LIS3MDL magnetometer and MLX90640 thermal camera are on Jetson I2C; orientation comes from the ZED2; there is no gas sensor. |
+| **Sensors** | The **arm PCB** hosts the LIS3MDL magnetometer + MLX90640 thermal camera on its I2C bus (low-priority tasks, forwarded over UART, republished by `esp32_bridge`). The chassis has no passive sensors. Orientation comes from the ZED2; there is no gas sensor. |
 | **Protocol** | Binary UART at 921600 baud to the Jetson. Each board periodically sends `MSG_BOARD_IDENTITY`, then only publishes the telemetry owned by its role. |
 
 ---
@@ -130,24 +130,25 @@ and must stay in sync with the Jetson bridge `struct` formats.
 | Dir | Type | Name |
 |-----|------|------|
 | → PC | 0x01 | Telemetry (mode, flags, PPM[6], track speeds, flipper angle, uptime) |
-| → PC | 0x03 | *(reserved — magnetometer is published by Jetson `jetson_sensors`)* |
+| → PC | 0x02 | Thermal frame (arm PCB: seq, min/max °C×100, cols/rows, 768 quantised px) |
+| → PC | 0x03 | Magnetometer (arm PCB: LIS3MDL XYZ, 3× int16 µT) |
 | → PC | 0x05 | Status |
 | → PC | 0x07 | Flipper angles (FL,FR,RL,RR) |
 | → PC | 0x08 | VESC status (incl. tachometer → track odometry) |
 | → PC | 0x0A / 0x0B / 0x0C / 0x0D | ODrive / LKTech / ZE300 status, ODrive error |
 | → PC | 0x0E / 0x0F | Arm lifecycle / board identity |
 | ← PC | 0x10 | Arm joints (6 × int16 deg×100) |
-| ← PC | 0x11 | *(reserved — `/sensors/enable_mask` is consumed on the Jetson)* |
+| ← PC | 0x11 | Sensor enable mask (arm PCB: bit0 mag, bit1 thermal) |
 | ← PC | 0x12 / 0x13 | E-stop / clear |
 | ← PC | 0x19 | Arm operating mode: `0` dexterity, `1` chassis |
 | ← PC | 0x14 | *(reserved — was the keybind table; RC scheme is fixed now)* |
 | ← PC | 0x15 | PPM calibration |
 | ← PC | 0x16 | Gripper (→ PC originates; reserved) |
 
-(0x02 thermal, 0x03 magnetometer, 0x04 gas, 0x06 IMU, 0x09 main-PWM are
-reserved-unused on this robot but the numbering is kept stable for GUI
-compatibility. Thermal and magnetometer are published by Jetson `jetson_sensors`;
-orientation comes from the ZED2 camera on the Jetson, not the ESP32.)
+(0x02 thermal + 0x03 magnetometer are sent by the **arm PCB** and republished by
+`esp32_bridge`. 0x04 gas, 0x06 IMU, 0x09 main-PWM stay reserved-unused but the
+numbering is kept stable for GUI compatibility. Orientation comes from the ZED2
+camera on the Jetson, not the ESP32.)
 
 The Jetson bridge routes outbound frames by role. Chassis ignores arm-only frames;
 arm ignores chassis-only frames; both accept software e-stop frames.
@@ -181,8 +182,10 @@ lib/      RC/             PPM decode (ISR) + calibration
           Locomotion/     drivetrain output (track mix + flipper angle/hold)
           CANInterface/   CAN HAL (MCP2515/TWAI) + VESC/ODrive/ZE300/LKTech
           Comms/          binary UART protocol
+          Sensors/        arm-PCB I2C: LIS3MDL mag + MLX90640 thermal (ARM role)
+          Gripper/        end-effector servo (LEDC PWM, ARM role)
           PID/            reusable PID (linear + shortest-angle) — spare
-src/      main.cpp        setup() + FreeRTOS tasks
+src/      main.cpp        setup() + FreeRTOS tasks (arm adds sensor + thermal tasks)
 
 ../VESC/  flipper_position.lisp   position loop that runs ON the flipper VESCs
 ```

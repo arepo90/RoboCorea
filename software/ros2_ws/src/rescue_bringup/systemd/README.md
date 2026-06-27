@@ -20,11 +20,11 @@ target and reports the state — so the GUI gets one-click control with no orpha
 | `zed.service` | ZED wrapper (`publish_tf:=false`). `PartOf` the target. |
 | `lidar.service` | RPLidar driver on the stable `/dev/rplidar`. `PartOf` the target. |
 | `rescue-sensors.target` | Group: start/stop/restart it to control **both** drivers. |
-| `jetson-sensors.service` | I2C sensors (MLX90640 thermal + LIS3MDL mag), one process owning the shared bus. On-demand (no `[Install]`). |
+| *(removed)* `jetson-sensors.service` | The MLX90640 thermal camera + LIS3MDL magnetometer moved to the **arm PCB** (read by the arm ESP32, relayed by `esp32_bridge`), so there is no Jetson I2C sensor service. Enable/disable is the GUI's `/sensors/enable_mask` (→ `MSG_SENSOR_ENABLE`), not a systemd stack. |
 | `rescue-mapping.service` | SLAM + odometry (`mapping_ekf.launch.py`, `use_rviz:=false`) — runs on the robot; the workstation only views `/map` over DDS. On-demand; needs the sensor stack up. Odometry source is switchable (EKF vs ZED-direct) via `ROBOCOREA_USE_EKF` — see [Odometry mode](#odometry-mode-prod-vs-bench). |
 | `rescue-mapping3d.service` | 3-D OctoMap (`rescue_mapping3d`) — builds an octree from the ZED cloud + TF on the robot; publishes only the compressed binary octree on `/robot/map3d` (latched, ~1 Hz). The raw cloud never leaves the Jetson. On-demand; needs sensors + mapping up. Also serves `/robot/map3d/{save,load}` (named `.bt` under `~/maps/<name>/`). |
 | `rescue-localization.service` | 2-D localization on a **saved** map (AMCL + map_server + Nav2 via `rescue_nav real_navigation.launch.py`). On-demand; (re)started by `map_manager` on a GUI map-load, reading the active map from `~/.config/rescue/active_map.env` (`MAP_DIR=~/maps/<name>`). Needs sensors + EKF up. Set the start pose from the GUI (click-drag → `/initialpose`). |
-| `robot-manager.service` | Always-on node managing **stacks**: exposes `/robot/<stack>/{start,stop,restart}` + `/robot/<stack>/status` for `sensors` (ZED+lidar), `i2c` (thermal+mag), `mapping` (SLAM+EKF), `mapping3d` (OctoMap) and `localization` (saved-map AMCL). |
+| `robot-manager.service` | Always-on node managing **stacks**: exposes `/robot/<stack>/{start,stop,restart}` + `/robot/<stack>/status` for `sensors` (ZED+lidar), `mapping` (SLAM+EKF), `mapping3d` (OctoMap) and `localization` (saved-map AMCL). |
 | `map-manager.service` | Always-on node owning the **named map library** (`~/maps/<name>/`): `/robot/maps/{save,list,load,delete}`. 2-D save = `slam_toolbox serialize_map` + `nav2_map_server map_saver_cli`; 3-D save/load forwarded to `octomap_node`; 2-D load writes `active_map.env` + restarts `rescue-localization.service`. |
 
 Before deploying, check the marked lines in each unit:
@@ -102,7 +102,7 @@ ros2 service call /robot/maps/delete rescue_interfaces/srv/DeleteMap "{name: are
 ```
 
 …or just use the GUI **Robot Systems** window (toolbar icon next to ⚙): the
-**Perception** tab has the **Sensors / I2C / Mapping / 3D / Localization ▶ / ⏹**
+**Perception** tab has the **Sensors / Mapping / 3D / Localization ▶ / ⏹**
 stack controls, and the **Maps** tab is the named map library (Load/Delete +
 previews). Map **save** + the click-drag **Set Start Pose** live on the map
 windows. Per-sensor **Thermal**/**Mag** enable toggles (gating

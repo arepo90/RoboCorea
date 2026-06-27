@@ -69,10 +69,9 @@ PerceptionPanel::PerceptionPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
              "(systemd rescue-sensors.target via robot_manager)",
              "Cleanly stop the ZED + RPLidar stack on the robot");
 
-    addStack(layout, "i2c", "I2C Sensors (thermal + mag)", "Start I2C",
-             "Start the MLX90640 + LIS3MDL driver on the robot "
-             "(systemd jetson-sensors.service via robot_manager)",
-             "Cleanly stop the I2C sensor driver on the robot");
+    // (No I2C-sensor stack: the MLX90640 thermal camera + LIS3MDL magnetometer
+    // moved to the arm PCB and are relayed by esp32_bridge. Enable/disable is the
+    // dashboard's thermal/mag toggles via /sensors/enable_mask, not a stack here.)
 
     open_map_btn_ = new QPushButton("Open 2D Map", this);
     open_map_btn_->setMinimumHeight(28);
@@ -239,7 +238,7 @@ void PerceptionPanel::onOpen3dMap()
 void PerceptionPanel::stopAllStacks()
 {
     // Dependents first (localization + 3-D/2-D mapping consume the sensors), then sensors.
-    const char* order[] = {"localization", "mapping3d", "mapping", "i2c", "sensors"};
+    const char* order[] = {"localization", "mapping3d", "mapping", "sensors"};
 
     auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
     std::vector<rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture> futures;

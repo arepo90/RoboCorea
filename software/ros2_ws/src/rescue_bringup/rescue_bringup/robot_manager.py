@@ -24,10 +24,11 @@ stack `<name>` it exposes:
 
 Default stacks:
   sensors -> rescue-sensors.target   (members: zed.service, lidar.service)
-  i2c     -> jetson-sensors.service  (members: jetson-sensors.service)
+  (The MLX90640 + LIS3MDL moved to the arm PCB / esp32_bridge, so there is no
+   longer a Jetson 'i2c' sensor stack to start/stop here.)
 
 Parameters
-  stacks          (str[])    stack names to manage   [sensors, i2c]
+  stacks          (str[])    stack names to manage   [sensors, mapping, ...]
   <name>.unit     (str)      systemd unit to control (default per built-in map)
   <name>.members  (str[])    member units for status (default: [unit])
   status_period   (float, s) status poll period      [1.0]
@@ -45,7 +46,6 @@ from std_srvs.srv import Trigger
 # name -> (control unit, [member units polled for status])
 DEFAULT_STACKS = {
     'sensors': ('rescue-sensors.target', ['zed.service', 'lidar.service']),
-    'i2c': ('jetson-sensors.service', ['jetson-sensors.service']),
     'mapping': ('rescue-mapping.service', ['rescue-mapping.service']),
     'mapping3d': ('rescue-mapping3d.service', ['rescue-mapping3d.service']),
     # 2-D localization on a saved map. Normally (re)started by map_manager on a
@@ -69,7 +69,7 @@ class RobotManager(Node):
         super().__init__('robot_manager')
 
         self.declare_parameter(
-            'stacks', ['sensors', 'i2c', 'mapping', 'mapping3d', 'localization'])
+            'stacks', ['sensors', 'mapping', 'mapping3d', 'localization'])
         self.declare_parameter('status_period', 0.5)   # 2 Hz: snappier GUI labels
         names = list(self.get_parameter('stacks').value)
         period = float(self.get_parameter('status_period').value)

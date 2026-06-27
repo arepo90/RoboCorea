@@ -8,9 +8,11 @@
 //                                      canTask   200 Hz  prio 4
 //
 // controlTask runs the state machine (RC → mix / flipper-PID / arm-relay).
-// commsTask owns the UART: it parses inbound frames and emits telemetry and
-// motor-status frames. canTask drains the TWAI bus and emits ODrive telemetry
-// RTRs. I2C victim-detection sensors live on the Jetson.
+// commsTask owns periodic telemetry/motor-status TX (and parses inbound frames).
+// canTask drains the CAN bus and emits ODrive telemetry RTRs. On the ARM board
+// two extra low-priority core-1 tasks read the I2C victim-detection sensors
+// (sensorTask = LIS3MDL magnetometer, thermalTask = MLX90640) and forward them —
+// they sit below control so they can never delay the arm CAN relay.
 //
 // See reference/architecture.md and the firmware README for details.
 
@@ -24,6 +26,7 @@
 #include "Comms.h"
 #include "Control.h"
 #include "Gripper.h"
+#include "Sensors.h"
 
 // ─── Core 1: control state machine ────────────────────────────────────────────
 static void controlTask(void*) {
@@ -137,6 +140,41 @@ static void commsTask(void*) {
     }
 }
 
+#if ROBOCOREA_ROLE_IS_ARM
+// ─── Core 1: magnetometer (low priority, below control) ───────────────────────
+// LIS3MDL read + forward. The I2C bus is shared with the thermal task via a mutex
+// inside Sensors; a read mid-thermal-frame is skipped rather than blocking.
+static void sensorTask(void*) {
+    const TickType_t period = pdMS_TO_TICKS(1000 / SENSOR_MAG_HZ);
+    TickType_t last = xTaskGetTickCount();
+    for (;;) {
+        if (Sensors::runOnce() & SENSOR_BIT_MAG) {
+            MagData m;
+            Sensors::getMag(m);
+            if (m.valid) Comms::sendMagData(m);   // TX mutex inside Comms
+        }
+        vTaskDelayUntil(&last, period);
+    }
+}
+
+// ─── Core 1: thermal camera (lowest priority) ─────────────────────────────────
+// MLX90640 getFrame() blocks ~250 ms; running it lowest-priority means the heavy
+// °C compute only soaks up core-1 idle time and is preempted instantly by the
+// control task. Each successful frame is quantised + shipped (TX mutex inside
+// Comms). The hardware refresh paces this to ~4 Hz, so no extra rate-limit.
+static void thermalTask(void*) {
+    for (;;) {
+        if (Sensors::runThermalOnce()) {
+            ThermalData t;
+            Sensors::getThermal(t);
+            if (t.valid) Comms::sendThermalFrame(t);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(100));   // disabled / not ready: back off
+        }
+    }
+}
+#endif
+
 void setup() {
     Comms::begin();          // UART + TX mutex
     CANInterface::begin();   // TWAI + arm controller bring-up (blocking)
@@ -145,6 +183,7 @@ void setup() {
 #endif
 #if ROBOCOREA_ROLE_IS_ARM
     Gripper::begin();        // LEDC end-effector servo on GPIO26; park at closed
+    Sensors::begin();        // LIS3MDL + MLX90640 on the arm PCB I2C bus
 #endif
     Control::begin();        // register callbacks, configure flipper PIDs
 #if ROBOCOREA_ROLE_IS_CHASSIS
@@ -157,6 +196,12 @@ void setup() {
                             PRIO_COMMS,   nullptr, TASK_CORE_COMMS);
     xTaskCreatePinnedToCore(canTask,     "can",     STACK_CAN,     nullptr,
                             PRIO_CAN,     nullptr, TASK_CORE_CAN);
+#if ROBOCOREA_ROLE_IS_ARM
+    xTaskCreatePinnedToCore(sensorTask,  "sensor",  STACK_SENSOR,  nullptr,
+                            PRIO_SENSOR,  nullptr, TASK_CORE_SENSOR);
+    xTaskCreatePinnedToCore(thermalTask, "thermal", STACK_THERMAL, nullptr,
+                            PRIO_THERMAL, nullptr, TASK_CORE_SENSOR);
+#endif
 }
 
 void loop() {

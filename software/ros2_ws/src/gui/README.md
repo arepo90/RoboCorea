@@ -56,7 +56,7 @@ Every cell in the 2×2 video grid can show any source, selected by a URI-style i
 | RF analog **driving** cams | `local:N` | digitized at the workstation → `/dev/videoN` → V4L2 |
 | **C920 Rear** (video only) | `gst:<pipeline>` | onboard H.264 → SRT → OpenCV/GStreamer decode |
 | **C920 Front** (video **+ audio**) | `av:<i>` | onboard H.264 **+ Opus mic** in one MPEG-TS/SRT → native GStreamer demux |
-| **Thermal** | `thermal:/sensors/thermal` | `jetson_sensors` → ROS `Image` (colormapped here) |
+| **Thermal** | `thermal:/sensors/thermal` | arm-PCB MLX90640 → `esp32_bridge` → ROS `Image` (colormapped here) |
 
 `CameraHub` owns one capture thread per distinct source (ref-counted, auto-
 reconnecting). `local:`/`gst:` open via OpenCV; the `av:` front stream is owned by

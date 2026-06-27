@@ -22,6 +22,8 @@ import struct
 import threading
 import time
 
+import numpy as np
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -32,11 +34,12 @@ from std_msgs.msg import (
     Bool, String, UInt8, UInt16, Float32, Float32MultiArray,
     Int16MultiArray, UInt16MultiArray,
 )
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import Image, JointState, MagneticField
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Vector3, Twist
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from std_srvs.srv import Trigger
+from mlx90640_msgs.msg import ThermalStatus
 
 from .protocol import (
     ROLE_ARM,
@@ -53,9 +56,11 @@ from .protocol import (
     MSG_ESTOP_CLEAR,
     MSG_GRIPPER,
     MSG_LKTECH_STATUS,
+    MSG_MAG,
     MSG_ODRIVE_ERROR,
     MSG_ODRIVE_STATUS,
     MSG_PPM_CALIB,
+    MSG_SENSOR_THERMAL,
     MSG_STATUS,
     MSG_TELEMETRY,
     MSG_TRACTION_CMD,
@@ -65,9 +70,13 @@ from .protocol import (
     FrameParser,
     RoleRouteTable,
     build_frame,
+    build_sensor_enable,
     build_traction_cmd,
     parse_identity,
+    parse_thermal_header,
 )
+
+MICROTESLA_TO_TESLA = 1e-6
 
 ARM_STATE_NAMES = {0: 'UNINIT', 1: 'INITIALIZING', 2: 'READY', 3: 'FAULT'}
 ARM_MODE_NAMES = {0: 'DEXTERITY', 1: 'CHASSIS'}
@@ -299,12 +308,27 @@ class ESP32BridgeNode(Node):
         self._odom_yaw = 0.0
         self._odom_last_t = None
 
+        # Arm-PCB passive sensors (MLX90640 thermal + LIS3MDL mag) arrive over the
+        # ARM UART link; republish them on the same topics the old Jetson I2C nodes
+        # used, and relay the GUI's /sensors/enable_mask down as MSG_SENSOR_ENABLE.
+        self.declare_parameter('thermal_frame_id', 'mlx90640_link')
+        self.declare_parameter('mag_frame_id', 'mag_link')
+        self.declare_parameter('default_sensor_mask', 3)  # bit0 mag, bit1 thermal (on)
+        self._thermal_frame_id = str(self.get_parameter('thermal_frame_id').value)
+        self._mag_frame_id = str(self.get_parameter('mag_frame_id').value)
+        self._sensor_mask = int(self.get_parameter('default_sensor_mask').value) & 0xFF
+        self._thermal_last_t = None
+        self._thermal_rate_hz = 0.0
+
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE, depth=10)
         latched_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL, depth=1)
+        reliable_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE, depth=10)
 
         # Publishers
         self._pub_telemetry = self.create_publisher(Float32MultiArray, '/robot/telemetry', sensor_qos)
@@ -324,6 +348,12 @@ class ESP32BridgeNode(Node):
         self._pub_lktech = self.create_publisher(Float32MultiArray, '/motors/lktech_status', sensor_qos)
         self._pub_ze300 = self.create_publisher(Float32MultiArray, '/motors/ze300_status', sensor_qos)
         self._pub_odrv_err = self.create_publisher(Float32MultiArray, '/motors/odrive_error', sensor_qos)
+        # Arm-PCB passive sensors, republished on the legacy topic names/types.
+        self._pub_mag = self.create_publisher(MagneticField, '/sensors/mag', sensor_qos)
+        self._pub_thermal = self.create_publisher(Image, '/sensors/thermal', sensor_qos)
+        self._pub_thermal_raw = self.create_publisher(Image, '/sensors/thermal_raw', sensor_qos)
+        self._pub_thermal_status = self.create_publisher(
+            ThermalStatus, '/sensors/thermal_status', reliable_qos)
         self._pub_arm_state = self.create_publisher(String, '/arm/state', latched_qos)
         self._pub_arm_fault = self.create_publisher(Bool, '/arm/fault', latched_qos)
         self._pub_arm_presence = self.create_publisher(UInt16, '/arm/can_presence', latched_qos)
@@ -350,6 +380,10 @@ class ESP32BridgeNode(Node):
         # and wait for a fresh operator request rather than auto-resuming.
         self.create_subscription(Twist, '/cmd_vel', self._on_cmd_vel, 10)
         self.create_subscription(Bool, '/autonomy/enable', self._on_autonomy_enable, 10)
+        # GUI enable mask (bit0 mag, bit1 thermal) → relayed to the ARM PCB. Latched
+        # QoS so a late-joining bridge picks up the operator's last choice; until one
+        # arrives we use default_sensor_mask, sent when the arm link identifies.
+        self.create_subscription(UInt8, '/sensors/enable_mask', self._on_enable_mask, latched_qos)
         # Watchdog: release the tracks back to RC if /cmd_vel goes stale.
         self.create_timer(0.1, self._cmd_vel_watchdog)
         self._publish_autonomy_state()
@@ -371,6 +405,8 @@ class ESP32BridgeNode(Node):
             MSG_ZE300_STATUS: self._handle_ze300_status,
             MSG_ODRIVE_ERROR: self._handle_odrive_error,
             MSG_ARM_LIFECYCLE: self._handle_arm_lifecycle,
+            MSG_MAG: self._handle_mag,
+            MSG_SENSOR_THERMAL: self._handle_thermal,
         }
 
         self._links_lock = threading.Lock()
@@ -504,6 +540,9 @@ class ESP32BridgeNode(Node):
         elif identity.role == ROLE_ARM:
             if self._software_estop_active or self._estop_mirror.active:
                 link.send(build_frame(MSG_ESTOP, b''))
+            # Push the current sensor enable mask so a freshly-(re)connected arm
+            # PCB starts its mag/thermal in the operator's last-chosen state.
+            link.send(build_sensor_enable(self._sensor_mask))
 
     def _send_to_role(self, role: int, frame: bytes, reason: str, log_missing: bool = True) -> bool:
         with self._links_lock:
@@ -807,6 +846,63 @@ class ESP32BridgeNode(Node):
         am.data = active_mask
         self._pub_arm_active.publish(am)
 
+    # Arm-PCB passive sensors (I2C, read on the arm ESP32).
+    def _handle_mag(self, payload: bytes):
+        if len(payload) < 6:
+            return
+        x_ut, y_ut, z_ut = struct.unpack_from('<hhh', payload)
+        msg = MagneticField()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self._mag_frame_id
+        msg.magnetic_field.x = x_ut * MICROTESLA_TO_TESLA
+        msg.magnetic_field.y = y_ut * MICROTESLA_TO_TESLA
+        msg.magnetic_field.z = z_ut * MICROTESLA_TO_TESLA
+        self._pub_mag.publish(msg)
+
+    def _handle_thermal(self, payload: bytes):
+        seq, min_c, max_c, cols, rows, q = parse_thermal_header(payload)
+        # Dequantise the 8-bit frame back to °C: min + (q/255)·(max − min).
+        span = max_c - min_c
+        celsius = (min_c + np.frombuffer(q, dtype=np.uint8).astype(np.float32)
+                   * (span / 255.0)).reshape(rows, cols)
+
+        now = self.get_clock().now()
+        stamp = now.to_msg()
+        img = Image()
+        img.header.stamp = stamp
+        img.header.frame_id = self._thermal_frame_id
+        img.height = rows
+        img.width = cols
+        img.encoding = '32FC1'
+        img.is_bigendian = 0
+        img.step = cols * 4
+        img.data = np.ascontiguousarray(celsius, dtype='<f4').tobytes()
+        self._pub_thermal.publish(img)
+        self._pub_thermal_raw.publish(img)
+
+        now_s = now.nanoseconds * 1e-9
+        if self._thermal_last_t is not None:
+            dt = now_s - self._thermal_last_t
+            if dt > 0.0:
+                self._thermal_rate_hz = 1.0 / dt
+        self._thermal_last_t = now_s
+
+        hotspot = int(np.argmax(celsius))
+        st = ThermalStatus()
+        st.header.stamp = stamp
+        st.header.frame_id = self._thermal_frame_id
+        st.sequence = int(seq)
+        st.sensor_ok = True
+        st.min_temperature = float(min_c)
+        st.max_temperature = float(max_c)
+        st.center_temperature = float(celsius[rows // 2, cols // 2])
+        st.hotspot_x = hotspot % cols
+        st.hotspot_y = hotspot // cols
+        st.total_read_errors = 0
+        st.consecutive_read_errors = 0
+        st.acquisition_rate_hz = float(self._thermal_rate_hz)
+        self._pub_thermal_status.publish(st)
+
     # PC -> ESP32.
     def _on_estop(self, msg: Bool):
         active = bool(msg.data)
@@ -897,6 +993,14 @@ class ESP32BridgeNode(Node):
         val = max(-1.0, min(1.0, float(msg.data)))
         self._send_to_role(ROLE_ARM, build_frame(MSG_GRIPPER, struct.pack('<h', int(val * 1000.0))),
                            'gripper command')
+
+    def _on_enable_mask(self, msg: UInt8):
+        # Relay the GUI's passive-sensor enable mask (bit0 mag, bit1 thermal) to the
+        # ARM PCB. Cached so _handle_identity can re-send it to a reconnecting arm.
+        mask = int(msg.data) & 0xFF
+        self._sensor_mask = mask
+        self._send_to_role(ROLE_ARM, build_sensor_enable(mask), 'sensor enable mask',
+                           log_missing=False)
 
     def _normalise_ppm(self, ch: int, ppm) -> float:
         # Mirror the firmware RC::normalise: asymmetric min/neutral/max → [-1, 1].

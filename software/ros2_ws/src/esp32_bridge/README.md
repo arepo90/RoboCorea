@@ -5,8 +5,11 @@ links to ROS 2 topics. This is the "relay" core described in
 [`../../../../reference/architecture.md`](../../../../reference/architecture.md):
 it runs on the Jetson Orin Nano, auto-identifies the chassis and arm PCBs from
 their firmware identity frames, publishes telemetry and motor status, and
-forwards commands to the owning board. Jetson I2C sensors live in
-`jetson_sensors`; this package is only the USB-serial bridge.
+forwards commands to the owning board. The MLX90640 thermal camera + LIS3MDL
+magnetometer now live on the **arm PCB**; the bridge decodes their UART frames
+(`MSG_SENSOR_THERMAL` / `MSG_SENSOR_MAG`) and republishes `/sensors/thermal`
+(+`_raw`,`_status`) and `/sensors/mag`, and relays the GUI's
+`/sensors/enable_mask` down to the arm as `MSG_SENSOR_ENABLE`.
 
 The wire format is the packed binary protocol in the firmware's
 `include/robot_types.h`; the `struct` formats in `main_bridge.py` and constants
@@ -102,5 +105,6 @@ ros2 run esp32_bridge esp32_bridge --ros-args \
   -p joint_names:='[shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3]'
 ```
 
-> Not implemented here (by design): the GUI, computer vision, MoveIt/kinematics,
-> and the Jetson I2C sensor nodes. This package is only the USB-serial bridge.
+> Not implemented here (by design): the GUI, computer vision, and
+> MoveIt/kinematics. The passive sensors (thermal + mag) are no longer separate
+> Jetson nodes — they're read on the arm PCB and republished by this bridge.

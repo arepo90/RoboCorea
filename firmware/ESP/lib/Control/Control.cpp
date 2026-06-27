@@ -45,7 +45,9 @@ void Control::begin() {
 #endif
     });
     Comms::onSensorEnable([](uint8_t mask) {
-#if ROBOCOREA_ROLE_IS_CHASSIS
+#if ROBOCOREA_ROLE_IS_ARM
+        // Passive sensors live on the ARM PCB now; the GUI's /sensors/enable_mask
+        // is relayed here (bit0 mag, bit1 thermal) → Sensors gates each one.
         Control::setSensorMask(mask);
 #else
         (void)mask;
@@ -359,7 +361,7 @@ void Control::setArmJoints(const ArmJointsPayload& payload) {
 }
 
 void Control::setSensorMask(uint8_t mask) {
-#if ROBOCOREA_ROLE_IS_CHASSIS
+#if ROBOCOREA_ROLE_IS_ARM
     portENTER_CRITICAL(&s_mux);
     s_sensor_mask = mask;
     portEXIT_CRITICAL(&s_mux);

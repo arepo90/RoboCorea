@@ -19,7 +19,9 @@
   <depend>diagnostic_msgs</depend>
   <depend>std_srvs</depend>
   <depend>builtin_interfaces</depend>
+  <depend>mlx90640_msgs</depend>
   <exec_depend>python3-serial</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

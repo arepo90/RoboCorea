@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run the RoboCorea robot_manager by hand (the sensor / i2c / mapping start-stop
+# Run the RoboCorea robot_manager by hand (the sensor / mapping start-stop
 # service the GUI talks to). Handy when you're not using the systemd unit
 # (robot-manager.service). Ctrl-C to stop.
 #

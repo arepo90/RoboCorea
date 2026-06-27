@@ -121,7 +121,7 @@ MainWindow::~MainWindow()
 void MainWindow::closeEvent(QCloseEvent* event)
 {
     // Closing the operator console stops the robot's perception stacks (sensors,
-    // i2c, 2-D + 3-D mapping) via robot_manager, so nothing is left running on
+    // 2-D + 3-D mapping, localization) via robot_manager, so nothing is left running on
     // the Jetson. Best-effort + bounded: the spin thread is still alive here, so
     // the requests get delivered; if robot_manager is unreachable it's a no-op.
     if (systems_window_)

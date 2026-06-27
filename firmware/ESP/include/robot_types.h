@@ -32,8 +32,16 @@ struct ArmJoints {
 
 // ─── Magnetometer ─────────────────────────────────────────────────────────────
 struct MagData {
-    int  x_uT, y_uT, z_uT;
+    int  x_uT, y_uT, z_uT;   // microtesla (LIS3MDL, ARM PCB I2C)
     bool valid;
+};
+
+// ─── Thermal camera (MLX90640, ARM PCB I2C) ──────────────────────────────────
+// Latest decoded frame in °C, row-major (THERMAL_ROWS × THERMAL_COLS). Filled by
+// the thermal task; quantised to the packed ThermalFramePayload before TX.
+struct ThermalData {
+    float pixels[THERMAL_PIXELS];  // °C
+    bool  valid;
 };
 
 // ─── System status ─────────────────────────────────────────────────────────────
@@ -70,9 +78,22 @@ struct SensorEnablePayload {
 };
 
 struct MagPayload {
-    int16_t x_uT100;               // µT × 100 (raw counts as sent by legacy)
-    int16_t y_uT100;
-    int16_t z_uT100;
+    int16_t x_uT;                  // microtesla (±32767 µT covers the 16-gauss range)
+    int16_t y_uT;
+    int16_t z_uT;
+};
+
+// One thermal frame (ESP → PC, MSG_SENSOR_THERMAL). The °C frame is quantised to
+// 8 bits per pixel across this frame's own [min, max] (both sent so the Jetson
+// reconstructs true °C). 776 bytes — well under PROTO_MAX_PAYLOAD, so it ships in
+// a single UART frame. pix[i] dequantises to  min + (pix[i]/255)·(max − min).
+struct ThermalFramePayload {
+    uint16_t seq;                  // frame counter (wraps)
+    int16_t  min_c100;             // frame minimum °C × 100
+    int16_t  max_c100;             // frame maximum °C × 100
+    uint8_t  cols;                 // THERMAL_COLS (32)
+    uint8_t  rows;                 // THERMAL_ROWS (24)
+    uint8_t  pix[THERMAL_PIXELS];  // row-major, quantised 0..255 over [min, max]
 };
 
 // Four flipper output angles × 10 deg (FL, FR, RL, RR).
@@ -191,6 +212,7 @@ struct ArmLifecyclePayload {
 // a payload without updating the matching struct.unpack/pack format there.
 static_assert(sizeof(TelemetryPayload)   == 24, "TelemetryPayload size");
 static_assert(sizeof(MagPayload)         ==  6, "MagPayload size");
+static_assert(sizeof(ThermalFramePayload) == 776, "ThermalFramePayload size");
 static_assert(sizeof(EncoderExtPayload)  ==  8, "EncoderExtPayload size");
 static_assert(sizeof(VescStatusPayload)  == 19, "VescStatusPayload size");
 static_assert(sizeof(OdriveStatusPayload) == 11, "OdriveStatusPayload size");

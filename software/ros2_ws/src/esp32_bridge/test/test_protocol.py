@@ -4,16 +4,23 @@ from esp32_bridge.protocol import (
     MSG_BOARD_IDENTITY,
     MSG_ESTOP,
     MSG_ESTOP_CLEAR,
+    MSG_SENSOR_ENABLE,
+    MSG_SENSOR_THERMAL,
     MSG_TRACTION_CMD,
     ROLE_ARM,
     ROLE_CHASSIS,
+    THERMAL_COLS,
+    THERMAL_PIXELS,
+    THERMAL_ROWS,
     BoardIdentity,
     ChassisEstopMirror,
     FrameParser,
     RoleRouteTable,
     build_frame,
+    build_sensor_enable,
     build_traction_cmd,
     parse_identity,
+    parse_thermal_header,
 )
 
 
@@ -69,6 +76,32 @@ def test_build_traction_cmd_roundtrips_and_clamps():
     _, payload = FrameParser().feed(build_traction_cmd(2.0, -3.0, False))[0]
     left, right, enable = struct.unpack('<hhB', payload)
     assert (left, right, enable) == (1000, -1000, 0)
+
+
+def test_build_sensor_enable_frames_a_single_mask_byte():
+    parsed = FrameParser().feed(build_sensor_enable(0b11))
+    assert parsed == [(MSG_SENSOR_ENABLE, b'\x03')]
+    # Only the low byte is kept.
+    _, payload = FrameParser().feed(build_sensor_enable(0x1FF))[0]
+    assert payload == b'\xFF'
+
+
+def test_parse_thermal_header_matches_firmware_wire_format():
+    # Mirror ThermalFramePayload: seq u16, min_c100 i16, max_c100 i16, cols u8,
+    # rows u8, then THERMAL_PIXELS quantised bytes (row-major).
+    pix = bytes((i % 256) for i in range(THERMAL_PIXELS))
+    payload = struct.pack('<HhhBB', 7, 1500, 4000, THERMAL_COLS, THERMAL_ROWS) + pix
+    frame = build_frame(MSG_SENSOR_THERMAL, payload)
+
+    msg_type, body = FrameParser().feed(frame)[0]
+    assert msg_type == MSG_SENSOR_THERMAL
+    seq, min_c, max_c, cols, rows, q = parse_thermal_header(body)
+    assert (seq, cols, rows) == (7, THERMAL_COLS, THERMAL_ROWS)
+    assert (min_c, max_c) == (15.0, 40.0)
+    assert q == pix
+    # Dequantisation endpoints land on the true min/max.
+    assert min_c + q[0] * (max_c - min_c) / 255.0 == min_c
+    assert abs((min_c + 255 * (max_c - min_c) / 255.0) - max_c) < 1e-6
 
 
 def test_chassis_estop_mirror_emits_only_on_transitions():

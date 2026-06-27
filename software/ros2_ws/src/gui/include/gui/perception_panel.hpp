@@ -10,16 +10,17 @@
 #include <std_srvs/srv/trigger.hpp>
 
 // Perception / mapping stack controls — moved out of the (cluttered) dashboard
-// into the Robot Systems window. Manages the four robot_manager-driven stacks on
-// the Jetson (start/stop over std_srvs/Trigger, live LED from /robot/<name>/status):
+// into the Robot Systems window. Manages the robot_manager-driven stacks on the
+// Jetson (start/stop over std_srvs/Trigger, live LED from /robot/<name>/status):
 //
 //   sensors    ZED + RPLidar          (rescue-sensors.target)
-//   i2c        MLX90640 + LIS3MDL      (jetson-sensors.service)
 //   mapping    slam_toolbox + EKF      (rescue-mapping.service)   + Open 2D map
 //   mapping3d  OctoMap                 (rescue-mapping3d.service) + Open 3D map
+//   localization  AMCL + map_server    (rescue-localization.service)
 //
-// The per-sensor enable toggles (mag/thermal /sensors/enable_mask) stay on the
-// dashboard with their readouts — only the stack lifecycle lives here.
+// The MLX90640 + LIS3MDL no longer have a Jetson 'i2c' stack — they moved to the
+// arm PCB (relayed by esp32_bridge). Their per-sensor enable toggles
+// (mag/thermal /sensors/enable_mask) stay on the dashboard with their readouts.
 class MapWindow;
 
 class PerceptionPanel : public QWidget {
@@ -27,8 +28,8 @@ class PerceptionPanel : public QWidget {
 public:
     explicit PerceptionPanel(rclcpp::Node::SharedPtr node, QWidget* parent = nullptr);
 
-    // Request a stop of every managed stack (dependents first: mapping3d, mapping,
-    // i2c, sensors). Called from MainWindow::closeEvent (via SystemsWindow) so
+    // Request a stop of every managed stack (dependents first: localization,
+    // mapping3d, mapping, sensors). Called from MainWindow::closeEvent (via SystemsWindow) so
     // closing the GUI tears the robot's perception stacks down cleanly. Blocks
     // briefly (best-effort) so the requests are delivered before shutdown.
     void stopAllStacks();

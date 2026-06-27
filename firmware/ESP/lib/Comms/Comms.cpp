@@ -144,10 +144,41 @@ void Comms::sendTelemetry(const TelemetryPayload& p) {
 
 void Comms::sendMagData(const MagData& mag) {
     MagPayload p;
-    p.x_uT100 = (int16_t)mag.x_uT;
-    p.y_uT100 = (int16_t)mag.y_uT;
-    p.z_uT100 = (int16_t)mag.z_uT;
+    p.x_uT = (int16_t)mag.x_uT;
+    p.y_uT = (int16_t)mag.y_uT;
+    p.z_uT = (int16_t)mag.z_uT;
     sendFrame(MSG_SENSOR_MAG, reinterpret_cast<const uint8_t*>(&p), sizeof(p));
+}
+
+// Quantise the °C frame to 8 bits/pixel across its own [min, max] and ship one
+// MSG_SENSOR_THERMAL frame. The Jetson reconstructs °C from min/max in the header
+// (see ThermalFramePayload). A flat frame (max == min) maps every pixel to 0.
+void Comms::sendThermalFrame(const ThermalData& thermal) {
+    static uint16_t s_seq = 0;
+
+    float vmin = thermal.pixels[0], vmax = thermal.pixels[0];
+    for (int i = 1; i < THERMAL_PIXELS; i++) {
+        float v = thermal.pixels[i];
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
+    }
+
+    ThermalFramePayload p;
+    p.seq      = s_seq++;
+    p.min_c100 = (int16_t)lroundf(vmin * 100.0f);
+    p.max_c100 = (int16_t)lroundf(vmax * 100.0f);
+    p.cols     = THERMAL_COLS;
+    p.rows     = THERMAL_ROWS;
+
+    float span = vmax - vmin;
+    float scale = (span > 1e-6f) ? (255.0f / span) : 0.0f;
+    for (int i = 0; i < THERMAL_PIXELS; i++) {
+        int q = (int)lroundf((thermal.pixels[i] - vmin) * scale);
+        if (q < 0) q = 0; else if (q > 255) q = 255;
+        p.pix[i] = (uint8_t)q;
+    }
+
+    sendFrame(MSG_SENSOR_THERMAL, reinterpret_cast<const uint8_t*>(&p), sizeof(p));
 }
 
 void Comms::sendEncoderExt(float fl, float fr, float rl, float rr) {

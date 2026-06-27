@@ -6,7 +6,7 @@
 # It makes the GUI's "Robot Systems" window work by ensuring the two always-on
 # controller nodes are up:
 #   • robot_manager — /robot/<stack>/{start,stop,restart,status} for
-#                     sensors · i2c · mapping · mapping3d · localization
+#                     sensors · mapping · mapping3d · localization
 #   • map_manager   — /robot/maps/{save,list,load,delete} (named 2-D/3-D maps)
 #
 # Those managers don't run drivers themselves — they ask the systemd --user units
@@ -32,7 +32,8 @@ WS="$SCRIPT_DIR/software/ros2_ws"
 ROS_SETUP="${ROS_SETUP:-/opt/ros/humble/setup.bash}"
 
 # Jetson-side packages the managers + the stacks they launch need built.
-JETSON_PKGS=(rescue_interfaces rescue_bringup esp32_bridge jetson_sensors \
+# (MLX90640/LIS3MDL moved to the arm PCB → esp32_bridge; no jetson_sensors pkg.)
+JETSON_PKGS=(rescue_interfaces mlx90640_msgs rescue_bringup esp32_bridge \
              dicerox_mapping rescue_nav rescue_mapping3d)
 
 MANAGERS=(robot-manager.service map-manager.service)
@@ -75,7 +76,7 @@ UNITS_SRC="$WS/install/rescue_bringup/share/rescue_bringup/systemd"
 if [ "$STATUS_ONLY" = 1 ]; then
   log "ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
   systemctl --user --no-pager status "${MANAGERS[@]}" || true
-  log "manager services exposed:"; ros2 service list 2>/dev/null | grep -E '/robot/(maps|sensors|i2c|mapping|mapping3d|localization)/' || true
+  log "manager services exposed:"; ros2 service list 2>/dev/null | grep -E '/robot/(maps|sensors|mapping|mapping3d|localization)/' || true
   exit 0
 fi
 
@@ -114,7 +115,7 @@ for u in "${MANAGERS[@]}"; do
 done
 
 log "manager services on the bus:"
-ros2 service list 2>/dev/null | grep -E '/robot/(maps|sensors|i2c|mapping|mapping3d|localization)/(start|save)' || \
+ros2 service list 2>/dev/null | grep -E '/robot/(maps|sensors|mapping|mapping3d|localization)/(start|save)' || \
   err "no /robot/* services seen yet (give it a moment, or check ROS_DOMAIN_ID=$ROS_DOMAIN_ID)"
 
 if [ "$ok" = 1 ]; then

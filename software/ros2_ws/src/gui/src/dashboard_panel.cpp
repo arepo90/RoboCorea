@@ -123,10 +123,10 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     }
 
     // ── Thermal acquisition enable ────────────────────────────────────────────
-    // The dashboard owns /sensors/enable_mask (bit0 mag, bit1 thermal); the I2C
-    // *driver* lifecycle moved to the Robot Systems window, but these per-sensor
-    // runtime enables stay here with the readouts. The mask is latched, so a
-    // toggle takes effect whenever the jetson_sensors driver is (re)started.
+    // The dashboard owns /sensors/enable_mask (bit0 mag, bit1 thermal). The
+    // sensors live on the arm PCB now (read by the arm ESP32); esp32_bridge
+    // forwards this mask down as MSG_SENSOR_ENABLE. The mask is latched, so the
+    // bridge re-applies the operator's choice whenever the arm PCB reconnects.
     {
         auto* row = new QHBoxLayout();
         row->setSpacing(4);
@@ -267,9 +267,9 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     connect(heartbeat_timer_, &QTimer::timeout, this, &DashboardPanel::onHeartbeatCheck);
     heartbeat_timer_->start();
 
-    // Latched (transient_local) so the jetson_sensors nodes pick up the last
-    // enable choice when they (re)start — e.g. after an I2C start/stop. Must match
-    // the nodes' enable_mask_qos() durability.
+    // Latched (transient_local) so esp32_bridge picks up the last enable choice
+    // when it (re)starts and relays it to the arm PCB. Must match the bridge
+    // subscription's durability.
     sensor_mask_pub_ = node_->create_publisher<std_msgs::msg::UInt8>(
         "/sensors/enable_mask", rclcpp::QoS(10).reliable().transient_local());
     publishSensorMask();  // start with all sensors off

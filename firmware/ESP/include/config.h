@@ -36,24 +36,37 @@
 #define BOARD_CAP_CHASSIS_IO       (1 << 0)
 #define BOARD_CAP_ARM_IO           (1 << 1)
 #define BOARD_CAP_RC_PPM           (1 << 2)
-#define BOARD_CAP_MAG              (1 << 3)  // reserved; mag is on Jetson I2C
+#define BOARD_CAP_MAG              (1 << 3)  // LIS3MDL on the ARM PCB I2C bus
 #define BOARD_CAP_VESC_BASE        (1 << 4)
 #define BOARD_CAP_ARM_CAN          (1 << 5)
+#define BOARD_CAP_THERMAL          (1 << 6)  // MLX90640 on the ARM PCB I2C bus
 
 #if ROBOCOREA_ROLE_IS_CHASSIS
   #define ROBOCOREA_BOARD_CAPABILITIES \
     (BOARD_CAP_CHASSIS_IO | BOARD_CAP_RC_PPM | BOARD_CAP_VESC_BASE)
 #else
   #define ROBOCOREA_BOARD_CAPABILITIES \
-    (BOARD_CAP_ARM_IO | BOARD_CAP_ARM_CAN)
+    (BOARD_CAP_ARM_IO | BOARD_CAP_ARM_CAN | BOARD_CAP_MAG | BOARD_CAP_THERMAL)
 #endif
 
-// ─── I2C (reserved on ESP32) ─────────────────────────────────────────────────
-// The MLX90640 and LIS3MDL both live on the Jetson I2C bus. These legacy pin
-// constants are kept for bench experiments only; normal firmware does not start
-// an ESP32 I2C sensor task.
+// ─── I2C (ARM PCB: passive victim-detection sensors) ─────────────────────────
+// The MLX90640 thermal camera and the LIS3MDL magnetometer moved OFF the Jetson
+// I2C (GPIO) and onto the ARM PCB's I2C bus — the Jetson's I2C proved unreliable.
+// The arm ESP32 reads them and ships them to the Jetson over the binary UART
+// link (MSG_SENSOR_THERMAL / MSG_SENSOR_MAG); the bridge republishes the same
+// /sensors/thermal + /sensors/mag topics. Only the ARM build starts the sensor
+// tasks (see main.cpp); on the chassis these pins are unused.
+//
+// PRIORITY NOTE: the arm itself is this board's job. The sensor tasks run at a
+// priority BELOW the CAN + control tasks (§FreeRTOS layout) and never touch the
+// CAN bus (sensors are I2C, the arm is CAN/SPI), so they can only consume idle
+// CPU and can never delay the arm CAN relay. Thermal is intentionally slow.
 #define PIN_I2C_SDA          21
 #define PIN_I2C_SCL          22
+// 400 kHz is the proven legacy speed and is enough for ~4 Hz full thermal frames
+// (a full MLX frame read takes ~250 ms here, which paces thermal to ~4 Hz). Bump
+// toward FM+ (1 MHz) on the bench if you raise THERMAL_REFRESH to 16 Hz.
+#define SENSOR_I2C_HZ    400000
 
 // ─── CAN backend selection ───────────────────────────────────────────────────
 // Pick exactly ONE transceiver backend. The rest of the CAN code is
@@ -418,17 +431,36 @@
 #define ARM_RAMP_MAX_VEL_DPS   { 20.0f, 18.0f, 18.0f, 40.0f, 40.0f, 40.0f }
 #define ARM_RAMP_MAX_ACC_DPS2  { 45.0f, 40.0f, 40.0f, 120.0f, 120.0f, 120.0f }
 
-// ─── Sensors ─────────────────────────────────────────────────────────────────
-// Passive victim-detection sensors are Jetson-hosted now: LIS3MDL magnetometer
-// and MLX90640 thermal over Linux I2C, with orientation from the ZED2. These
-// mask bits remain reserved so the wire protocol numbering stays stable; the
-// Jetson sensor nodes consume /sensors/enable_mask directly.
-#define SENSOR_BIT_MAG       (1 << 0)  // reserved (handled on the Jetson)
-#define SENSOR_BIT_THERMAL   (1 << 1)  // reserved (handled on the Jetson)
+// ─── Sensors (ARM PCB I2C: MLX90640 thermal + LIS3MDL magnetometer) ──────────
+// Both passive victim-detection sensors live on the ARM PCB's I2C bus now. The
+// arm ESP32 reads them in low-priority FreeRTOS tasks and forwards them over the
+// UART link; the Jetson bridge republishes /sensors/thermal + /sensors/mag.
+// Orientation still comes from the ZED2 (no IMU on the ESP32). Each sensor stays
+// idle until its bit is set in /sensors/enable_mask (GUI toggle → bridge →
+// MSG_SENSOR_ENABLE → Sensors::setEnabledMask), so a disabled sensor never even
+// touches the I2C bus.
+#define SENSOR_BIT_MAG       (1 << 0)  // LIS3MDL magnetometer (ARM PCB I2C)
+#define SENSOR_BIT_THERMAL   (1 << 1)  // MLX90640 thermal camera (ARM PCB I2C)
 #define SENSOR_BIT_GAS       (1 << 2)  // reserved (sensor removed)
 #define SENSOR_BIT_IMU       (1 << 3)  // reserved (no IMU on the ESP32; orientation from ZED2)
 
-#define SENSOR_MAG_HZ           50
+#define SENSOR_MAG_HZ           50     // LIS3MDL read rate (self-throttles around thermal reads)
+
+// ── MLX90640 thermal camera ───────────────────────────────────────────────────
+// 32×24 (cols×rows) array. getFrame() reads both sub-pages + runs the on-chip
+// calibration to °C; it BLOCKS for ~1/(refresh/2) s, so it owns a dedicated
+// low-priority task. THERMAL_REFRESH is the per-sub-page rate; a full frame
+// arrives at about half that (8 Hz sub-page ⇒ ~4 Hz full frames — the chosen
+// default). The float compute (~30 ms/frame) only ever runs in core-1 idle time.
+#define MLX90640_I2C_ADDR     0x33
+#define THERMAL_COLS            32
+#define THERMAL_ROWS            24
+#define THERMAL_PIXELS        (THERMAL_COLS * THERMAL_ROWS)   // 768
+// MLX90640 refresh enum value passed to setRefreshRate(): 3=2Hz 4=4Hz 5=8Hz 6=16Hz.
+// 8 Hz sub-page ⇒ ~4 Hz full frames. Lower to 4 (=4Hz/~2Hz) to give the arm even
+// more headroom; raise to 6 (=16Hz/~8Hz) only with a faster I2C clock (SENSOR_I2C_HZ).
+#define THERMAL_REFRESH_RATE     5     // MLX90640_8_HZ
+#define THERMAL_RESOLUTION       3     // MLX90640_ADC_18BIT
 
 // ─── Jetson binary protocol ──────────────────────────────────────────────────
 // Frame: [0xAA][0x55][TYPE:1][LEN_H:1][LEN_L:1][PAYLOAD:LEN][CRC:1]
@@ -438,12 +470,11 @@
 #define PROTO_MAX_PAYLOAD    1600
 
 // ESP32 → PC. (Type numbers kept identical to the legacy protocol so the
-// existing GUI/bridge stay compatible; 0x02 thermal / 0x03 mag / 0x04 gas /
-// 0x09 main-PWM
-// are reserved-unused on this robot.)
+// existing GUI/bridge stay compatible; 0x04 gas / 0x09 main-PWM are
+// reserved-unused on this robot.)
 #define MSG_TELEMETRY        0x01      // PPM + state + track speed + flipper angle, 50 Hz
-#define MSG_SENSOR_THERMAL   0x02      // reserved (thermal is published by the Jetson)
-#define MSG_SENSOR_MAG       0x03      // reserved (magnetometer is published by the Jetson)
+#define MSG_SENSOR_THERMAL   0x02      // ARM PCB: MLX90640 frame (seq+min/max+768 quantised px), ~4 Hz
+#define MSG_SENSOR_MAG       0x03      // ARM PCB: LIS3MDL XYZ (int16 µT), 50 Hz
 #define MSG_SENSOR_GAS       0x04      // reserved (sensor removed)
 #define MSG_STATUS           0x05      // system status / heartbeat
 #define MSG_SENSOR_IMU       0x06      // reserved (no IMU on the ESP32; orientation from ZED2)
@@ -459,7 +490,7 @@
 
 // PC → ESP32
 #define MSG_ARM_JOINTS       0x10      // 6 × int16 joint angles (deg × 100)
-#define MSG_SENSOR_ENABLE    0x11      // reserved legacy 1-byte bitmask
+#define MSG_SENSOR_ENABLE    0x11      // PC→ESP(ARM): 1-byte mask (bit0 mag, bit1 thermal)
 #define MSG_ESTOP            0x12      // 0-byte payload — immediate stop
 #define MSG_ESTOP_CLEAR      0x13      // 0-byte payload — resume
 #define MSG_KEYBIND          0x14      // RESERVED — the per-channel keybind table was
@@ -480,18 +511,29 @@
 #define EXT_DRIVE_TIMEOUT_MS 300       // stale external command → fall back to RC
 
 // ─── FreeRTOS task layout ────────────────────────────────────────────────────
-// Core 0: protocol (comms + CAN).  Core 1: control.
+// Core 0: protocol (comms + CAN).  Core 1: control (+ the ARM sensor tasks).
+//
+// The two ARM-only sensor tasks sit on core 1 BELOW the control task and never
+// run on core 0, so the arm CAN servicing (canTask) + UART RX (commsTask) on
+// core 0 keep full priority. They only consume core-1 idle time between the
+// 50 Hz control ticks, and the heavy MLX float compute is preempted instantly
+// whenever control is ready — the arm always wins (see the I2C section note).
 #define TASK_CORE_COMMS      0
 #define TASK_CORE_CAN        0
 #define TASK_CORE_CONTROL    1
+#define TASK_CORE_SENSOR     1      // ARM only: mag + thermal, low priority
 
 #define STACK_CONTROL     5120
 #define STACK_COMMS       4096
 #define STACK_CAN         4096
+#define STACK_SENSOR      4096      // LIS3MDL read + send
+#define STACK_THERMAL     6144      // MLX90640 getFrame() + calibration + quantise
 
 #define PRIO_CONTROL         5      // highest — real-time loop
 #define PRIO_COMMS           4
 #define PRIO_CAN             4
+#define PRIO_SENSOR          2      // below control/comms/can: best-effort
+#define PRIO_THERMAL         1      // lowest: the heavy thermal compute yields to all
 
 #define CONTROL_LOOP_HZ     50
 #define CAN_POLL_HZ        200
