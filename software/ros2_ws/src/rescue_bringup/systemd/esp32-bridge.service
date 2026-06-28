@@ -1,0 +1,30 @@
+[Unit]
+Description=RoboCorea ESP32 bridge (serial <-> ROS 2 relay; thermal/mag + wheel odom)
+# Always-on core relay: opens BOTH ESP32 USB-serial links (chassis + arm), binds
+# them by MSG_BOARD_IDENTITY, and bridges the binary UART protocol to/from ROS 2
+# topics. It also republishes the arm-PCB thermal/mag sensors (/sensors/thermal,
+# /sensors/mag) and integrates the traction VESC tachometers into /odom/wheel.
+# Not PartOf any stack target — it must stay up whenever the robot is on.
+#
+# The Zenoh router (rmw-zenoh-router.service) is a SYSTEM unit; this is a --user
+# unit, so it cannot order against it. That's fine: Zenoh peers auto-retry the
+# router connection, so the bridge reconnects once the router is up.
+
+[Service]
+# Must match the workstation/GUI domain. RMW (Zenoh) is inherited from
+# /etc/profile.d/ros-rmw-zenoh.sh via `bash -lc` (see scripts/setup-zenoh.sh).
+Environment=ROS_DOMAIN_ID=20
+# Optional explicit serial device for the bridge. Empty (default) => the bridge
+# scans serial_candidates (includes /dev/ttyCH341USB* for the WCH CH341 driver
+# the Jetson loads for the ESP32 CH340 UARTs). jetson.sh sets this from --serial.
+Environment=ROBOCOREA_SERIAL_PORT=
+# Adjust the workspace path if yours differs (%h is $HOME).
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch esp32_bridge esp32_bridge.launch.py serial_port:=${ROBOCOREA_SERIAL_PORT}'
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

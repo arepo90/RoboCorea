@@ -72,9 +72,13 @@ class RobotManager(Node):
     def __init__(self):
         super().__init__('robot_manager')
 
+        # NOTE: there is no 'i2c' stack — the MLX90640 thermal camera + LIS3MDL
+        # magnetometer moved to the ARM PCB (read by the arm ESP32, relayed by
+        # esp32_bridge as /sensors/thermal + /sensors/mag). Enable/disable is the
+        # GUI's /sensors/enable_mask, not a systemd stack here.
         self.declare_parameter(
             'stacks',
-            ['sensors', 'i2c', 'mapping', 'mapping3d', 'localization', 'navigation'])
+            ['sensors', 'mapping', 'mapping3d', 'localization', 'navigation'])
         self.declare_parameter('status_period', 0.5)   # 2 Hz: snappier GUI labels
         names = list(self.get_parameter('stacks').value)
         period = float(self.get_parameter('status_period').value)

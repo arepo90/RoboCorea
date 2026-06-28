@@ -953,12 +953,16 @@ angle** (they are never driven home).
     the robot/arm URDF (rooted at `base_link`) attach under the nav frames.
   - `base_link → base_laser` — static RPLidar extrinsics (A1 mounted reversed →
     `yaw = π` by default).
-  > **Note:** `dicerox_mapping`'s *standalone* launches use the shorter
-  > `odom → base_footprint → base_laser` (no `base_link`); the `sensor_frontend`
-  > path above is the fuller, canonical tree used for the real-robot workflows.
-  > The bridge's `/odom/wheel` is stamped `child_frame=base_link` (coincident with
-  > `base_footprint`); the EKF's `adaptive_odom_covariance` restamps it to
-  > `base_footprint` before fusion.
+  > **Note:** **both** real-robot stacks now share this one front-end —
+  > `rescue-mapping.service` (`real_mapping.launch.py`) and
+  > `rescue-localization.service` (`real_navigation.launch.py`) each include
+  > `sensor_frontend.launch.py`, so mapping and localization produce the *same*
+  > canonical tree (no `base_link`-vs-not divergence between them). The
+  > `dicerox_mapping/mapping.launch.py` file remains only as a **standalone dev
+  > tool** with the shorter `odom → base_footprint → base_laser` tree — not used by
+  > any production stack. The bridge's `/odom/wheel` is stamped
+  > `child_frame=base_link` (coincident with `base_footprint`); the EKF's
+  > `adaptive_odom_covariance` restamps it to `base_footprint` before fusion.
 
 The digital twin in the GUI consumes the **combined** robot URDF
 (`arm_description/dicerox_full.urdf` — arm + chassis + flippers) on
@@ -970,18 +974,24 @@ joints from `servo_node`, the flipper joints from `arm_teleop/flipper_state`
 
 ## 15. Networking
 
-- Jetson and workstation are on the **same ROS 2 / DDS domain** over
+- The ROS 2 middleware is **Zenoh** (`rmw_zenoh`), not the default Fast-DDS.
+  Each host runs a per-host **Zenoh router** (a system service) configured for
+  **unicast TCP** to the peer (multicast disabled, gossip + auto-retry) — reliable
+  on congested arena Wi-Fi. ROS nodes are Zenoh peers connecting to their local
+  router (`localhost:7447`); the two routers federate discovery over one TCP link.
+  Static IPs: **Jetson `192.168.50.10`, laptop `192.168.50.11`**. Set up once per
+  host with [`scripts/setup-zenoh.sh`](../scripts/setup-zenoh.sh) (installs the
+  router, makes `rmw_zenoh_cpp` the default RMW, pins `ROS_DOMAIN_ID`).
+- Jetson and workstation share one **`ROS_DOMAIN_ID`** (default **20**) over
   Wi-Fi/Ethernet. No micro-ROS; the only serial link is ESP32↔Jetson.
 - Large/continuous data (thermal image) uses appropriate QoS; config/PPM
   calibration uses **reliable + transient-local** so a late-joining GUI or
   bridge still receives the latest value.
-- **Bulk media does not use DDS.** The RF *driving* cameras are local webcams at
+- **Bulk media does not ride ROS.** The RF *driving* cameras are local webcams at
   the workstation; the C920 *inspection* cameras stream H.264 (+ Opus audio) over
   **SRT** (selective retransmission within a fixed latency budget — tuned for the
   lossy arena Wi-Fi). Only the 32×24 thermal image rides ROS. The Jetson is the
   SRT listener; the GUI is the caller and reconnects on drop.
-- Set a shared `ROS_DOMAIN_ID` on both hosts; consider a tuned DDS profile for
-  Wi-Fi (the legacy stack ran plain Fast-DDS).
 
 ---
 
@@ -1083,6 +1093,13 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
+> **One-command bring-up (the easy path):** `./jetson.sh` on the robot and
+> `./laptop.sh` on the workstation (repo root) do everything below as managed
+> services. The full operator runbook — map-while-teleop, save, localize +
+> navigate, fresh-reboot bring-up, parameter overrides — is
+> [`OPERATIONS.md`](../OPERATIONS.md). The manual commands here are what those
+> scripts automate.
+
 **On the Jetson** launch the relay + the C920 video/audio streamer. The thermal
 camera + magnetometer come up automatically with the bridge (they're read on the
 arm PCB and republished here — no separate sensor node):
@@ -1107,8 +1124,16 @@ ros2 launch gui bringup.launch.py                 # GUI + twin + servo
 ros2 launch gui bringup.launch.py joystick:=true  # + gamepad arm teleop
 ```
 
-Per-host convenience scripts should live in `rescue_bringup` (cf. legacy
-`scripts/jetson.sh`, `scripts/interface.sh`, `scripts/arm.sh`).
+Per-host one-command bring-up lives at the repo root: **`jetson.sh`** (robot:
+installs the systemd units, starts `esp32-bridge` + `robot-manager` +
+`map-manager` + `c920-stream`, leaves perception on-demand for the GUI) and
+**`laptop.sh`** (workstation: `gui bringup.launch.py`). Both reconcile the Zenoh
+router + domain and take overrides (`--serial`, `--no-ekf`, `--domain`, …).
+**`diagnose.sh`** is the read-only hardware diagnostics dispatcher (PPM, CAN
+presence for the 6 VESCs + 6 arm joints, arm-PCB I2C sensors, comms/link health
+— `esp32_bridge` `diag_*` nodes). The robot-side perception/maps systemd layer is
+in `rescue_bringup` (`robot_manager` + `map_manager` + `systemd/`); see its README
+and [`OPERATIONS.md`](../OPERATIONS.md).
 
 **Workstation extra deps:** Qt6 (incl. `libqt6opengl6-dev`), OpenCV w/ GStreamer,
 **GStreamer dev + runtime plugins** (`libgstreamer1.0-dev

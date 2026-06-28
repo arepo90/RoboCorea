@@ -7,9 +7,10 @@ Brings up:
     single continuous odom -> base_footprint estimate (and the TF).
 
 This is the ONLY publisher of odom -> base_footprint. When you run it alongside
-dicerox_mapping, launch the mapping side with publish_odom_tf:=false (and the
-ZED driver with publish_tf:=false) so nothing fights the EKF for that TF.
-mapping_ekf.launch.py wires that up for you.
+the SLAM/localization front-end, keep the planar ZED node's TF off
+(publish_odom_tf:=false) and run the ZED driver with publish_tf:=false so nothing
+fights the EKF for that TF. real_mapping.launch.py / real_navigation.launch.py
+wire that up for you (the use_ekf arg selects EKF vs ZED-direct).
 
 Outputs:
   /odometry/filtered  (nav_msgs/Odometry)  — the fused estimate

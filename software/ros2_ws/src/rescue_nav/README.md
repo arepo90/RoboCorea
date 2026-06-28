@@ -103,8 +103,12 @@ frames** (the bridge stamps wheel odom `child_frame=base_link`; the ZED IMU is i
 ### Run it
 
 The EKF becomes the **sole owner** of `odom → base_footprint`, so the ZED-only TF
-must be turned off. `mapping_ekf.launch.py` wires that up (it includes
-`dicerox_mapping/mapping.launch.py` with `publish_odom_tf:=false` + the fusion layer):
+must be turned off. `real_mapping.launch.py` (mapping) and `real_navigation.launch.py`
+(localization/nav) both wire that up — they share **one** front-end
+(`sensor_frontend.launch.py`, the canonical `map→odom→base_footprint→base_link→base_laser`
+tree) and run the fusion layer with the ZED-only TF off. The `use_ekf` arg picks
+the odometry owner: `true` (default) = the EKF; `false` = `zed_planar_odom` direct
+(bench/no-bridge).
 
 ```bash
 cd software/ros2_ws
@@ -112,15 +116,18 @@ colcon build --packages-select esp32_bridge dicerox_mapping rescue_nav
 source install/setup.bash
 
 # Build a map with FUSED odom (run the ZED wrapper with publish_tf:=false first):
-ros2 launch rescue_nav mapping_ekf.launch.py
-#   ... drive with the RC, then:
-ros2 launch dicerox_mapping save_map.launch.py map_name:=$HOME/maps/track
+ros2 launch rescue_nav real_mapping.launch.py
+#   ... drive with the RC, then save BOTH artifacts (grid + posegraph):
+ros2 launch rescue_nav save_competition_map.launch.py map_name:=$HOME/maps/track
 
 # Localize against a saved map + navigate with FUSED odom:
-ros2 launch rescue_nav mapping_ekf.launch.py \
-  slam_params_file:=$(ros2 pkg prefix dicerox_mapping)/share/dicerox_mapping/config/slam_toolbox_localization.yaml
-ros2 launch rescue_nav nav2.launch.py use_sim_time:=false
+ros2 launch rescue_nav real_navigation.launch.py map:=$HOME/maps/track.yaml
 ```
+
+> On the real robot this is automated: `rescue-mapping.service` runs
+> `real_mapping.launch.py` and `rescue-localization.service` runs
+> `real_navigation.launch.py nav:=false`, both started from the GUI. See
+> [`OPERATIONS.md`](../../../../OPERATIONS.md).
 
 Just the fusion layer (e.g. on top of your own mapping launch):
 ```bash

@@ -25,6 +25,12 @@ setup(
         'console_scripts': [
             'esp32_bridge = esp32_bridge.main_bridge:main',
             'can_presence_check = esp32_bridge.can_presence_check:main',
+            # Diagnostic monitors (read-only). Driven by the root diagnose.sh.
+            'diag_all = esp32_bridge.diagnostics:main_all',
+            'diag_link = esp32_bridge.diagnostics:main_link',
+            'diag_ppm = esp32_bridge.diagnostics:main_ppm',
+            'diag_can = esp32_bridge.diagnostics:main_can',
+            'diag_sensors = esp32_bridge.diagnostics:main_sensors',
         ],
     },
 )

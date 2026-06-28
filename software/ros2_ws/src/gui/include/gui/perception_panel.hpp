@@ -15,7 +15,6 @@
 // /robot/<name>/status):
 //
 //   sensors      ZED + RPLidar             (rescue-sensors.target)
-//   i2c          MLX90640 + LIS3MDL        (jetson-sensors.service)
 //   mapping      slam_toolbox + EKF        (rescue-mapping.service)    + Open 2D map
 //   mapping3d    OctoMap                   (rescue-mapping3d.service)  + Open 3D map
 //   localization AMCL + map_server + EKF   (rescue-localization.service)

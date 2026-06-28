@@ -5,7 +5,7 @@ only the compressed binary octree on /robot/map3d (latched, low-rate). The raw
 cloud never leaves the robot. Requires the sensors + 2-D mapping stacks already
 running (the ZED cloud and the map->odom->base_footprint TF tree).
 
-TF note: the mapping_ekf tree ends at base_footprint. The ZED's camera frames are
+TF note: the 2-D mapping tree's odom edge ends at base_footprint. The ZED's camera frames are
 their own subtree rooted at zed_camera_link (published by the ZED state publisher
 on the Jetson; the robot URDF that would mount them lives on the laptop). To let
 octomap_node transform the cloud into `map`, we graft the ZED subtree onto the map

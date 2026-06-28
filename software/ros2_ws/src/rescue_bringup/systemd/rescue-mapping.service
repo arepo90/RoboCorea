@@ -1,12 +1,18 @@
 [Unit]
-Description=RoboCorea SLAM + EKF (mapping_ekf: slam_toolbox + robot_localization)
+Description=RoboCorea SLAM + EKF (real_mapping: slam_toolbox + robot_localization)
 # On-demand, started by robot_manager after the sensor stack is up. SLAM/EKF run
 # HERE on the robot (close to the sensors); the workstation only visualizes /map
-# + TF over DDS. Depends on the raw ZED/lidar drivers (rescue-sensors.target)
-# already publishing /scan and /zed/zed_node/odom.
+# + TF over the network. Depends on the raw ZED/lidar drivers
+# (rescue-sensors.target) already publishing /scan and /zed/zed_node/odom.
+#
+# Uses real_mapping.launch.py — the SAME perception/odom/TF front-end
+# (sensor_frontend.launch.py) that rescue-localization.service uses, so mapping
+# and localization share one canonical TF tree:
+#     map -> odom -> base_footprint -> base_link -> base_laser
 
 [Service]
-# Must match the workstation/GUI domain.
+# Must match the workstation/GUI domain. RMW (Zenoh) is inherited from
+# /etc/profile.d/ros-rmw-zenoh.sh via `bash -lc` (see scripts/setup-zenoh.sh).
 Environment=ROS_DOMAIN_ID=20
 # use_rviz:=false — the Jetson is headless; RViz runs on the workstation.
 # use_ekf — odometry source: EKF fusion (prod) vs zed_planar_odom direct (bench).
@@ -17,7 +23,7 @@ Environment=ROS_DOMAIN_ID=20
 #     systemctl --user unset-environment ROBOCOREA_USE_EKF
 #   (Don't hardcode it via Environment= here — that would override the toggle.)
 # Adjust the workspace path if yours differs.
-ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch rescue_nav mapping_ekf.launch.py use_rviz:=false use_ekf:=${ROBOCOREA_USE_EKF:-true}'
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch rescue_nav real_mapping.launch.py use_rviz:=false use_ekf:=${ROBOCOREA_USE_EKF:-true}'
 KillSignal=SIGINT
 KillMode=control-group
 TimeoutStopSec=15

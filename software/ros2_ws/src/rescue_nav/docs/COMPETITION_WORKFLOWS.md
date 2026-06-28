@@ -184,9 +184,10 @@ ros2 topic hz /odometry/filtered      # fused odom heartbeat
 
 ## Reverting to the original ZED-only mapping behavior
 
-The legacy stack is untouched. To map with ZED-only odom (no EKF/fusion):
+To map with ZED-only odom (no EKF/fusion) — bench/handheld, or no tracks/bridge:
 ```bash
-ros2 launch dicerox_mapping mapping.launch.py        # original behavior
-# or via the production launch, skipping the EKF:
-ros2 launch rescue_nav real_mapping.launch.py odom_tf_owner:=zed
+# production launch, skipping the EKF (zed_planar_odom owns odom->base_footprint):
+ros2 launch rescue_nav real_mapping.launch.py use_ekf:=false
+# (the standalone dev tool `ros2 launch dicerox_mapping mapping.launch.py` also
+#  does ZED-only mapping, but uses its own shorter TF tree — prefer the line above)
 ```

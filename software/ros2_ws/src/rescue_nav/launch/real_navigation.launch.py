@@ -14,7 +14,7 @@ Pipeline:
 
 TF ownership (exactly one publisher per edge):
     map -> odom              : AMCL  (or slam_toolbox)        — selected localization
-    odom -> base_footprint   : EKF   (or ZED planar)          — odom_tf_owner
+    odom -> base_footprint   : EKF   (or ZED planar)          — use_ekf
     base_footprint->base_link->base_laser : static            — sensor_frontend
 
 SAFETY: launching this does NOT move the robot. Nav2 only publishes /cmd_vel;
@@ -37,7 +37,8 @@ Key args:
     use_sim_time   (false)
     use_rviz       (true)
     namespace      ('')
-    odom_tf_owner  (ekf)      'ekf' | 'zed'
+    use_ekf        (true)     true = fused EKF owns odom->base_footprint (prod);
+                              false = ZED-only planar odom owns it (bench/no-bridge)
     set_initial_pose (true)   publish initial_pose_* to /initialpose once (AMCL)
     initial_pose_x/y/yaw (0)  initial pose in the map frame
     imu_topic / imu_yaw_sign / zed_odom_topic — forwarded to the fusion layer
@@ -76,11 +77,11 @@ def _setup(context, *args, **kwargs):
     zed_odom_topic = LaunchConfiguration('zed_odom_topic')
 
     # Resolved (string) values we need to branch on at launch time.
-    owner = LaunchConfiguration('odom_tf_owner').perform(context)
+    use_ekf = LaunchConfiguration('use_ekf').perform(context).lower() in (
+        'true', '1', 'yes')
     localization = LaunchConfiguration('localization').perform(context)
     slam_map_file = LaunchConfiguration('slam_map_file').perform(context)
-    use_ekf = owner == 'ekf'
-    zed_publishes_tf = 'true' if owner == 'zed' else 'false'
+    zed_publishes_tf = 'false' if use_ekf else 'true'
 
     frontend_launch = os.path.join(nav_share, 'launch', 'sensor_frontend.launch.py')
     fusion_launch = os.path.join(nav_share, 'launch', 'odom_fusion.launch.py')
@@ -232,8 +233,10 @@ def generate_launch_description():
             'slam_map_file', default_value='',
             description='Posegraph basename (no extension) for localization:=slam_toolbox.'),
         DeclareLaunchArgument(
-            'odom_tf_owner', default_value='ekf',
-            description="'ekf' (fused, default) | 'zed' (ZED-only, no EKF)."),
+            'use_ekf', default_value='true',
+            description="true = fused robot_localization EKF owns "
+                        "odom->base_footprint (default, prod); "
+                        "false = ZED-only planar odom owns it (bench/no-bridge)."),
         DeclareLaunchArgument(
             'nav', default_value='true',
             description="Include the Nav2 navigation stack. Set false for "

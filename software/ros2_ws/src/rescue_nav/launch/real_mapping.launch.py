@@ -14,7 +14,7 @@ ODOMETRY (not ZED-only), so SLAM gets the most robust odom the robot can make:
 
 TF ownership (exactly one publisher per edge):
     map -> odom              : slam_toolbox        (this launch)
-    odom -> base_footprint   : EKF (odom_tf_owner=ekf) OR ZED planar (odom_tf_owner=zed)
+    odom -> base_footprint   : EKF (use_ekf=true) OR ZED planar (use_ekf=false)
     base_footprint->base_link->base_laser : static (sensor_frontend)
 
 After driving the arena, save with:
@@ -31,7 +31,12 @@ Args:
     namespace      ('')     — single-robot default; reserved for multi-robot
     slam_params_file        — slam_toolbox mapping config (dicerox_mapping default)
     map_save_path           — informational; printed as the save command hint
-    odom_tf_owner  (ekf)    — 'ekf' (fused, default) or 'zed' (ZED-only, no EKF)
+    use_ekf        (true)   — true: the robot_localization EKF owns
+                              odom->base_footprint (prod, fused wheel+ZED VIO+IMU).
+                              false: zed_planar_odom owns it directly (bench/ZED-only,
+                              no tracks/bridge). This is the ONE odometry-mode switch
+                              for the whole mapping stack (rescue-mapping.service maps
+                              ROBOCOREA_USE_EKF onto it).
     imu_topic / imu_yaw_sign / zed_odom_topic — forwarded to the fusion layer
 """
 
@@ -45,7 +50,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     LogInfo,
 )
-from launch.conditions import IfCondition, LaunchConfigurationEquals
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node, PushRosNamespace
@@ -60,7 +65,7 @@ def generate_launch_description():
     namespace = LaunchConfiguration('namespace')
     slam_params_file = LaunchConfiguration('slam_params_file')
     map_save_path = LaunchConfiguration('map_save_path')
-    odom_tf_owner = LaunchConfiguration('odom_tf_owner')
+    use_ekf_cfg = LaunchConfiguration('use_ekf')
     zed_odom_topic = LaunchConfiguration('zed_odom_topic')
     imu_topic = LaunchConfiguration('imu_topic')
     imu_yaw_sign = LaunchConfiguration('imu_yaw_sign')
@@ -69,9 +74,11 @@ def generate_launch_description():
     fusion_launch = os.path.join(nav_share, 'launch', 'odom_fusion.launch.py')
 
     # The ZED planar node (inside sensor_frontend) publishes odom->base_footprint
-    # ONLY in the ZED-only fallback. In the default 'ekf' path the EKF owns it.
-    zed_publishes_tf = PythonExpression(["'true' if '", odom_tf_owner, "' == 'zed' else 'false'"])
-    use_ekf = LaunchConfigurationEquals('odom_tf_owner', 'ekf')
+    # ONLY in the ZED-only fallback (use_ekf:=false). In the default EKF path the
+    # EKF owns it, so the planar node is a pure /filtered_odom source.
+    use_ekf = IfCondition(use_ekf_cfg)
+    zed_publishes_tf = PythonExpression(
+        ["'false' if '", use_ekf_cfg, "'.lower() in ('true', '1', 'yes') else 'true'"])
 
     declared = [
         DeclareLaunchArgument('use_sim_time', default_value='false'),
@@ -86,9 +93,10 @@ def generate_launch_description():
             default_value=os.path.join(os.path.expanduser('~'), 'maps', 'competition_map'),
             description='Where you intend to save the map (no extension). Informational.'),
         DeclareLaunchArgument(
-            'odom_tf_owner', default_value='ekf',
-            description="'ekf' = fused odom owns odom->base_footprint (default); "
-                        "'zed' = ZED-only planar odom owns it (no fusion)."),
+            'use_ekf', default_value='true',
+            description="true = fused robot_localization EKF owns "
+                        "odom->base_footprint (default, prod); "
+                        "false = ZED-only planar odom owns it (bench/no-bridge)."),
         DeclareLaunchArgument('zed_odom_topic', default_value='/zed/zed_node/odom'),
         DeclareLaunchArgument('imu_topic', default_value='/zed/zed_node/imu/data'),
         DeclareLaunchArgument('imu_yaw_sign', default_value='1.0'),

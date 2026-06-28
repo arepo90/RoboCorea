@@ -301,7 +301,7 @@ void PerceptionPanel::stopAllStacks()
     // Dependents first (navigation rides on localization; localization + 3-D/2-D
     // mapping consume the sensors), then sensors.
     const char* order[] = {"navigation", "localization", "mapping3d", "mapping",
-                           "i2c", "sensors"};
+                           "sensors"};
 
     auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
     std::vector<rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture> futures;

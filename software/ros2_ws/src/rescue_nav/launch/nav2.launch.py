@@ -23,7 +23,9 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('params_file', default_value=default_params),
-        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        # Default FALSE: the real robot runs on the wall clock. The sim entry
+        # points (demo.launch.py) pass use_sim_time:=true explicitly.
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(nav2_bringup, 'launch', 'navigation_launch.py')),
