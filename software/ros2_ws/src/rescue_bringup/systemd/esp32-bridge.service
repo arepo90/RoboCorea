@@ -19,10 +19,15 @@ Environment=ROS_DOMAIN_ID=20
 # the Jetson loads for the ESP32 CH340 UARTs). jetson.sh sets this from --serial.
 Environment=ROBOCOREA_SERIAL_PORT=
 # Adjust the workspace path if yours differs (%h is $HOME).
+# serial_candidates is pinned to /dev/ttyCH341USB* (the CH340 ESP32 PCBs) so the
+# always-on bridge does NOT open the RPLidar's CP2102 (which enumerates as ttyUSB0
+# and is also reachable via /dev/serial/by-id/*). Without this the bridge holds
+# ttyUSB0 open waiting for a board identity, and lidar.service (serial_port:=
+# /dev/rplidar -> ttyUSB0) fails to init. The glob is double-quoted so bash does
+# NOT pre-expand it — the node expands it internally and binds chassis+arm by id.
 # Pass serial_port:= ONLY when ROBOCOREA_SERIAL_PORT is non-empty — an empty
-# `serial_port:=` is rejected by ros2 launch ("malformed launch argument"). When
-# empty (the default) the bridge scans serial_candidates instead.
-ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch esp32_bridge esp32_bridge.launch.py ${ROBOCOREA_SERIAL_PORT:+serial_port:=$ROBOCOREA_SERIAL_PORT}'
+# `serial_port:=` is rejected by ros2 launch ("malformed launch argument").
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 launch esp32_bridge esp32_bridge.launch.py serial_candidates:="/dev/ttyCH341USB*" ${ROBOCOREA_SERIAL_PORT:+serial_port:=$ROBOCOREA_SERIAL_PORT}'
 KillSignal=SIGINT
 KillMode=control-group
 TimeoutStopSec=10
