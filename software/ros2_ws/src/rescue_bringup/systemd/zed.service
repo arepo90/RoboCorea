@@ -1,6 +1,11 @@
 [Unit]
 Description=RoboCorea ZED camera driver
 PartOf=rescue-sensors.target
+# The ZED SDK occasionally fails to open the camera on a cold start (USB
+# enumeration/bandwidth timing) — historically needing a manual retry 2-3×.
+# Let systemd auto-retry: up to 6 starts per 120 s, then give up (camera absent).
+StartLimitIntervalSec=120
+StartLimitBurst=6
 
 [Service]
 # Must match the workstation/GUI domain (and the other robot nodes).
@@ -17,7 +22,10 @@ ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCore
 KillSignal=SIGINT
 KillMode=control-group
 TimeoutStopSec=20
-Restart=no
+# Auto-retry a failed cold start (bounded by StartLimit* above). A clean SIGINT
+# stop exits 0, so stopping from the GUI does NOT trigger a restart.
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=rescue-sensors.target
