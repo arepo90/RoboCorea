@@ -57,27 +57,7 @@ void main() {
 }
 )";
 
-static const char* GRID_VERT = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-uniform mat4 view;
-uniform mat4 projection;
-out float dist;
-void main() {
-    gl_Position = projection * view * vec4(aPos, 1.0);
-    dist = length(aPos.xy);
-}
-)";
-
-static const char* GRID_FRAG = R"(
-#version 330 core
-in float dist;
-out vec4 FragColor;
-void main() {
-    float alpha = clamp(1.0 - dist / 3.0, 0.05, 0.3);
-    FragColor = vec4(0.5, 0.5, 0.5, alpha);
-}
-)";
+// (The origin grid reuses the main VERT_SHADER/FRAG_SHADER program above.)
 
 // Textured floor (occupancy grid) — map mode only.
 static const char* TEX_VERT = R"(

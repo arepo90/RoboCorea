@@ -82,7 +82,10 @@ set +u; source "$ROS_SETUP"; set -u
 
 if [ "$DO_BUILD" = 1 ]; then
   log "colcon build (${JETSON_PKGS[*]}) ..."
-  ( cd "$WS" && colcon build --symlink-install --packages-up-to "${JETSON_PKGS[@]}" )
+  # -Wno-dev suppresses CMake "dev" warnings from ROS's own modules (e.g. the
+  # CMP0148 FindPythonInterp noise every rosidl message package emits).
+  ( cd "$WS" && colcon build --symlink-install --packages-up-to "${JETSON_PKGS[@]}" \
+      --cmake-args -Wno-dev )
 fi
 [ -f "$WS/install/setup.bash" ] || {
   err "workspace not built: $WS/install/setup.bash missing — run with --build"; exit 1; }

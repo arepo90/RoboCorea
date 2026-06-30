@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.10)
 project(mlx90640_msgs)
 
 find_package(ament_cmake REQUIRED)
