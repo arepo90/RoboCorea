@@ -15,13 +15,13 @@ set -euo pipefail
 # --- Configuration ------------------------------------------------------------
 CAMERAS=(
     #"/dev/video2;8890;hw:CARD=C920,DEV=0"   # Example: video + mic (A/V)
-    "/dev/video2;8890;"                      # Current: video only
+    "/dev/video2;8890;hw:CARD=C920,DEV=0"                      # Current: video only
 )
 
 WIDTH=1280
 HEIGHT=720
-FRAMERATE=30
-BITRATE=2000          # Video kbps per stream. Size to the link's WORST case.
+FRAMERATE=20
+BITRATE=1500          # Video kbps per stream. Size to the link's WORST case.
 OPUS_KBPS=24          # Audio bitrate. 24 kbps mono = clean voice.
 LATENCY=120           # SRT receive/ARQ budget in ms.
 PROFILE="constrained-baseline"
