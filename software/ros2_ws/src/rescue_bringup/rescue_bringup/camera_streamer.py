@@ -32,6 +32,7 @@ import threading
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
@@ -126,12 +127,16 @@ class CameraStreamer(Node):
         self._primary_key = None         # which bus_info owns the A/V primary
         self._catalog_json = None        # last-published catalog (dedupe republish)
 
-        # ZED tap runtime (populated lazily on the first image).
+        # ZED tap runtime (a GStreamer appsrc pipeline built lazily on the first
+        # image). Uses gi/Gst directly — NOT cv2/cv_bridge — so it is immune to the
+        # NumPy-1.x-vs-2.x breakage that cripples cv_bridge on JetPack.
         self._zed_lock = threading.Lock()
-        self._zed_writer = None
-        self._zed_bridge = None
+        self._Gst = None                 # gi.repository.Gst once imported
+        self._zed_hw = False             # nvv4l2h264enc available
+        self._zed_pipe = None            # Gst.Pipeline
+        self._zed_appsrc = None          # appsrc element we push frames into
         self._zed_last_frame = 0.0
-        self._zed_size = None
+        self._zed_size = None            # (w, h, gst_format) the pipeline was built for
 
         # ── Catalog publisher (latched so late-joining GUIs get it) ───────────
         latched = QoSProfile(
@@ -192,8 +197,6 @@ class CameraStreamer(Node):
                                        'will retry if still present')
                 self._streams.pop(key, None)
 
-        changed = False
-
         # Stop streams whose camera vanished.
         for key in list(self._streams.keys()):
             if key == 'zed':
@@ -202,7 +205,6 @@ class CameraStreamer(Node):
                 self._stop_stream(key)
                 if key == self._primary_key:
                     self._primary_key = None
-                changed = True
 
         # Start streams for newly present cameras.
         for key, (dev, card) in detected.items():
@@ -216,15 +218,18 @@ class CameraStreamer(Node):
                 self._start_stream(key, dev, card, self._primary_port, audio=True)
             else:
                 port = self._port_for(key)
-                self._start_stream(key, dev, card, port, audio=False)
-                changed = True   # video-only cams are advertised in the catalog
+                self._start_stream(key, dev, card, port, audio=False)   # advertised in catalog
 
         # Refresh the ZED tap's catalog presence (started/stopped by the image cb).
-        if self._zed_enable and self._sync_zed_state():
-            changed = True
+        if self._zed_enable:
+            self._sync_zed_state()
 
-        if changed:
-            self._publish_catalog()
+        # Republish EVERY tick (force), not only on change: the catalog is latched,
+        # but rmw_zenoh does not reliably re-serve a latched sample to a subscriber
+        # that joins after the one-shot publish (and a single publish can race
+        # discovery). A cheap periodic (re)publish makes the GUI converge within one
+        # rescan regardless. _publish_catalog only *logs* when the content changes.
+        self._publish_catalog(force=True)
 
     def _port_for(self, key: str) -> int:
         if key not in self._port_by_key:
@@ -299,87 +304,110 @@ class CameraStreamer(Node):
         ).split()
 
     # ── ZED tap (re-encode the SDK's published left image to SRT) ─────────────
+    # ROS Image encoding -> (GStreamer raw format, bytes/pixel).
+    _ENC_TO_GST = {
+        'bgra8': 'BGRA', 'rgba8': 'RGBA', 'bgr8': 'BGR', 'rgb8': 'RGB',
+        'mono8': 'GRAY8', 'bgr16': None, 'rgb16': None,
+    }
+
     def _setup_zed_subscription(self):
+        # Use GStreamer's Python bindings directly (no cv2/cv_bridge, which are
+        # broken by NumPy 2.x on this JetPack). Any failure just disables the ZED
+        # tap — the USB camera streaming must never be taken down by it.
         try:
-            from cv_bridge import CvBridge
+            import gi
+            gi.require_version('Gst', '1.0')
+            gi.require_version('GstApp', '1.0')
+            from gi.repository import Gst
+            from gi.repository import GstApp  # noqa: F401 (registers appsrc actions)
+            Gst.init(None)
             from sensor_msgs.msg import Image
         except Exception as exc:
-            self.get_logger().warn(f'ZED tap disabled — cv_bridge/sensor_msgs missing: {exc}')
+            self.get_logger().warn(f'ZED tap disabled — GStreamer python (gi) unavailable: {exc}')
             self._zed_enable = False
             return
-        self._zed_bridge = CvBridge()
+        self._Gst = Gst
+        self._zed_hw = Gst.ElementFactory.find('nvv4l2h264enc') is not None
         best_effort = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(Image, self._zed_topic, self._on_zed_image, best_effort)
 
     def _on_zed_image(self, msg):
-        if self._zed_bridge is None:
+        if self._Gst is None:
             return
-        try:
-            frame = self._zed_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        except Exception as exc:
-            self.get_logger().warn(f'ZED frame convert failed: {exc}', throttle_duration_sec=5.0)
+        gst_format = self._ENC_TO_GST.get(msg.encoding)
+        if gst_format is None:
+            self.get_logger().warn(
+                f'ZED tap: unsupported image encoding "{msg.encoding}"',
+                throttle_duration_sec=10.0)
             return
         with self._zed_lock:
-            if self._zed_writer is None:
-                self._open_zed_writer(frame.shape[1], frame.shape[0])
-            if self._zed_writer is not None:
-                self._zed_writer.write(frame)
-                self._zed_last_frame = time.monotonic()
+            want = (msg.width, msg.height, gst_format)
+            if self._zed_appsrc is None or self._zed_size != want:
+                if not self._open_zed_pipeline(*want):
+                    return
+            buf = self._Gst.Buffer.new_wrapped(bytes(msg.data))
+            # push-buffer is an appsrc action signal; ret is a GstFlowReturn enum.
+            self._zed_appsrc.emit('push-buffer', buf)
+            self._zed_last_frame = time.monotonic()
 
-    def _open_zed_writer(self, w, h):
-        import cv2
-        self._zed_size = (w, h)
-        # Prefer the Jetson HW encoder; fall back to CPU x264enc if unavailable.
-        for hw in (True, False):
-            pipeline = self._zed_pipeline(hw, w, h)
-            writer = cv2.VideoWriter(pipeline, cv2.CAP_GSTREAMER, 0,
-                                     float(self._zed_fps), (w, h), True)
-            if writer.isOpened():
-                self._zed_writer = writer
-                self.get_logger().info(
-                    f'ZED tap: {w}x{h} -> srt://:{self._zed_port} '
-                    f'({"HW nvv4l2h264enc" if hw else "CPU x264enc"})')
-                return
-            writer.release()
-        self.get_logger().error('ZED tap: could not open a GStreamer VideoWriter '
-                                '(is OpenCV built with GStreamer?) — ZED stream disabled')
-
-    def _zed_pipeline(self, hw, w, h):
-        srtsink = self._srtsink(self._zed_port)
-        if hw:
-            return (
-                f'appsrc ! videoconvert ! video/x-raw,format=I420 ! '
-                f'nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! '
-                f'nvv4l2h264enc insert-sps-pps=true iframeinterval={self._zed_fps} '
-                f'bitrate={self._bitrate * 1000} ! h264parse config-interval=-1 ! '
-                f'mpegtsmux alignment=7 ! {srtsink}'
-            )
-        return (
-            f'appsrc ! videoconvert ! '
-            f'x264enc bitrate={self._bitrate} speed-preset=ultrafast tune=zerolatency '
-            f'key-int-max={self._zed_fps} ! video/x-h264,profile=constrained-baseline ! '
-            f'h264parse config-interval=-1 ! mpegtsmux alignment=7 ! {srtsink}'
+    def _open_zed_pipeline(self, w, h, gst_format):
+        Gst = self._Gst
+        if self._zed_hw:
+            enc = (f'nvvidconv ! nvv4l2h264enc insert-sps-pps=true '
+                   f'iframeinterval={self._zed_fps} bitrate={self._bitrate * 1000}')
+        else:
+            enc = (f'x264enc bitrate={self._bitrate} speed-preset=ultrafast '
+                   f'tune=zerolatency key-int-max={self._zed_fps} ! '
+                   f'video/x-h264,profile=constrained-baseline')
+        desc = (
+            'appsrc name=src is-live=true do-timestamp=true format=time ! '
+            'videoconvert ! ' + enc + ' ! '
+            'h264parse config-interval=-1 ! mpegtsmux alignment=7 ! '
+            + self._srtsink(self._zed_port)
         )
+        try:
+            pipe = Gst.parse_launch(desc)
+            appsrc = pipe.get_by_name('src')
+            appsrc.set_property('caps', Gst.Caps.from_string(
+                f'video/x-raw,format={gst_format},width={w},height={h},'
+                f'framerate={self._zed_fps}/1'))
+            appsrc.set_property('block', True)
+            pipe.set_state(Gst.State.PLAYING)
+        except Exception as exc:
+            self.get_logger().error(f'ZED tap: pipeline build failed: {exc}')
+            return False
+        self._teardown_zed_pipe()   # drop any previous one
+        self._zed_pipe = pipe
+        self._zed_appsrc = appsrc
+        self._zed_size = (w, h, gst_format)
+        self.get_logger().info(
+            f'ZED tap: {w}x{h} {gst_format} -> srt://:{self._zed_port} '
+            f'({"HW nvv4l2h264enc" if self._zed_hw else "CPU x264enc"})')
+        return True
+
+    def _teardown_zed_pipe(self):
+        if self._zed_pipe is not None and self._Gst is not None:
+            self._zed_pipe.set_state(self._Gst.State.NULL)
+        self._zed_pipe = None
+        self._zed_appsrc = None
+        self._zed_size = None
 
     def _sync_zed_state(self):
         """Add/remove the ZED entry in _streams based on frame liveness. Returns
         True if the catalog presence changed."""
         with self._zed_lock:
-            live = (self._zed_writer is not None
+            live = (self._zed_appsrc is not None
                     and (time.monotonic() - self._zed_last_frame) < self._zed_stale_s)
-        present = 'zed' in self._streams
-        if live and not present:
-            self._streams['zed'] = dict(name=self._zed_name, port=self._zed_port,
-                                        proc=None, audio=False, dev=self._zed_topic)
-            return True
-        if not live and present:
-            self._streams.pop('zed', None)
-            # Drop the writer so a resumed SDK re-opens cleanly at its size.
-            with self._zed_lock:
-                if self._zed_writer is not None:
-                    self._zed_writer.release()
-                    self._zed_writer = None
-            return True
+            present = 'zed' in self._streams
+            if live and not present:
+                self._streams['zed'] = dict(name=self._zed_name, port=self._zed_port,
+                                            proc=None, audio=False, dev=self._zed_topic)
+                return True
+            if not live and present:
+                self._streams.pop('zed', None)
+                # Drop the pipeline so a resumed SDK re-opens cleanly at its size.
+                self._teardown_zed_pipe()
+                return True
         return False
 
     # ── Catalog ───────────────────────────────────────────────────────────────
@@ -390,11 +418,13 @@ class CameraStreamer(Node):
                 for s in self._streams.values() if not s['audio']]
         cams.sort(key=lambda c: c['port'])
         payload = json.dumps({'cameras': cams})
-        if not force and payload == self._catalog_json:
+        changed = (payload != self._catalog_json)
+        if not changed and not force:
             return
         self._catalog_json = payload
         self._pub_catalog.publish(String(data=payload))
-        self.get_logger().info(f'catalog: {len(cams)} video stream(s) advertised')
+        if changed:   # only log on real change (force republishes every tick, silent)
+            self.get_logger().info(f'catalog: {len(cams)} video stream(s) advertised')
 
     # ── Teardown ──────────────────────────────────────────────────────────────
     def destroy_node(self):
@@ -402,9 +432,7 @@ class CameraStreamer(Node):
             if key != 'zed':
                 self._stop_stream(key)
         with self._zed_lock:
-            if self._zed_writer is not None:
-                self._zed_writer.release()
-                self._zed_writer = None
+            self._teardown_zed_pipe()
         super().destroy_node()
 
 
@@ -413,11 +441,12 @@ def main(args=None):
     node = CameraStreamer()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass   # Ctrl-C or systemd SIGINT — normal stop
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():          # signal handler may have shut the context already
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

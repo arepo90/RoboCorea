@@ -16,9 +16,11 @@
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>rescue_interfaces</exec_depend>
-  <!-- camera_streamer: ZED left-image tap re-encoded to SRT -->
+  <!-- camera_streamer: ZED left-image tap re-encoded to SRT (via gi/Gst appsrc;
+       deliberately NOT cv_bridge/cv2, which NumPy 2.x breaks on JetPack) -->
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>python3-gi</exec_depend>
+  <exec_depend>gstreamer1.0-plugins-base</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

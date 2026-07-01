@@ -214,6 +214,9 @@ void SourceManager::onCameraStreamsReceived(const std_msgs::msg::String::SharedP
 
     {
         std::lock_guard<std::mutex> lock(dyn_mutex_);
+        if (cams == dynamic_cameras_)
+            return;   // unchanged (the robot republishes the latched catalog
+                      // periodically) — don't churn the source dropdowns/selection
         dynamic_cameras_ = std::move(cams);
     }
     rebuildSourceList();

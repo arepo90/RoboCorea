@@ -340,6 +340,10 @@ static constexpr uint8_t ODRV_GET_IQ         = 0x14;
 static constexpr uint8_t ODRV_GET_BUS_V      = 0x17;
 static constexpr uint8_t ODRV_CLEAR_ERRORS   = 0x18;
 
+// AXIS_STATE values carried in the heartbeat (cmd 0x01, byte 4).
+static constexpr uint8_t ODRV_AXIS_STATE_IDLE        = 1;
+static constexpr uint8_t ODRV_AXIS_STATE_CLOSED_LOOP = 8;
+
 static inline uint32_t odrvCOB(uint8_t node, uint8_t cmd) {
     return ((uint32_t)node << 5) | cmd;
 }
@@ -371,11 +375,33 @@ static bool odrvReadEncoderZero(uint8_t node, float& out_turns) {
     }
     return false;
 }
+#if ODRIVE_CONFIRM_CLOSED_LOOP
+// Block until a heartbeat from `node` reports AXIS_STATE_CLOSED_LOOP, or timeout.
+// Drains (and drops) other frames while waiting, like canReceiveUntil's callers.
+static bool odrvWaitClosedLoop(uint8_t node, uint32_t timeout_ms) {
+    CanFrame rx;
+    return canReceiveUntil(timeout_ms, rx, [&](const CanFrame& f) {
+        return !f.rtr && !f.extd && ((f.id >> 5) & 0x3F) == node &&
+               (f.id & 0x1F) == ODRV_HEARTBEAT && f.dlc >= 5 &&
+               f.data[4] == ODRV_AXIS_STATE_CLOSED_LOOP;
+    });
+}
+#endif
+
 static bool odrvInitAndReadZero(uint8_t node, float& zero) {
     for (uint8_t a = 0; a < ODRIVE_INIT_MAX_RETRIES; a++) {
         if (a > 0) delay(ODRIVE_INIT_RETRY_DELAY_MS);
+        odrvClearErrors(node);                 // clear any latched error before requesting closed loop
         odrvAxisState(node, 8 /*CLOSED_LOOP*/);
+#if ODRIVE_CONFIRM_CLOSED_LOOP
+        // A GET_ENCODER read succeeds even while the axis sits in IDLE, so it is
+        // NOT proof the closed-loop transition took. Require an observed
+        // CLOSED_LOOP heartbeat first — otherwise a latched-idle joint would zero
+        // and report READY (the false-success that let re-arm "work" on a limp joint).
+        if (!odrvWaitClosedLoop(node, ODRIVE_CLOSED_LOOP_TIMEOUT_MS)) continue;
+#else
         delay(50);
+#endif
         if (odrvReadEncoderZero(node, zero)) return true;
     }
     return false;
@@ -387,6 +413,17 @@ struct OdriveFeedback {
 };
 static OdriveFeedback s_odrv_fb[ODRIVE_NUM_JOINTS] = {};
 static portMUX_TYPE   s_odrv_mux = portMUX_INITIALIZER_UNLOCKED;
+// Set once the first live encoder estimate lands, so recovery only trusts a
+// measured position (for bumpless re-seed) after there is one.
+static bool           s_odrv_pos_seen[ODRIVE_NUM_JOINTS] = {};
+
+// Last ODrive heartbeat (cmd 0x01) per joint: axis_error + axis_state + when it
+// arrived. This is the ONLY frame that reports whether the axis is in CLOSED_LOOP
+// vs. has disarmed itself to IDLE; presence/telemetry frames keep flowing either
+// way. Written under s_odrv_mux from the CAN task; read lock-free elsewhere (a
+// single-byte axis_state read is atomic — matches the presence-mask convention).
+struct OdriveHeartbeat { uint32_t axis_error; uint8_t axis_state; uint32_t last_ms; bool seen; };
+static OdriveHeartbeat s_odrv_hb[ODRIVE_NUM_JOINTS] = {};
 
 static const uint8_t s_odrv_node[ODRIVE_NUM_JOINTS] = { ODRIVE_NODE_J1, ODRIVE_NODE_J2, ODRIVE_NODE_J3 };
 static const float   s_odrv_gear[ODRIVE_NUM_JOINTS] = { ODRIVE_GEAR_J1, ODRIVE_GEAR_J2, ODRIVE_GEAR_J3 };
@@ -668,6 +705,11 @@ static bool armArmInternal() {
     s_arm_motor_fail = 0;
     s_arm_presence_mask = 0;
     for (uint8_t j = 0; j < 6; j++) s_arm_joint_heard_ms[j] = 0;
+    // Drop last session's heartbeat cache so a stale IDLE/CLOSED_LOOP snapshot can't
+    // briefly mislead the presence gating or recovery before fresh frames land.
+    portENTER_CRITICAL(&s_odrv_mux);
+    for (uint8_t j = 0; j < ODRIVE_NUM_JOINTS; j++) s_odrv_hb[j] = OdriveHeartbeat{};
+    portEXIT_CRITICAL(&s_odrv_mux);
     s_arm_fail_win   = 0;
     s_arm_estop_hold = false;   // a fresh arm clears any lingering e-stop hold
     bool ok = true;
@@ -807,6 +849,23 @@ void CANInterface::getArmLifecycle(ArmLifecyclePayload& out) {
         }
     }
 #endif
+#if ODRIVE_GREEN_MEANS_CLOSED_LOOP
+    // A tripped ODrive keeps heartbeating (so it never goes stale) but hangs limp.
+    // Require an observed CLOSED_LOOP state for J1–J3 so "green" means "holding",
+    // not merely "on the bus" — the operator sees the drop, and its recovery.
+    if (s_arm_state == ArmState::READY) {
+        for (uint8_t j = 0; j < ODRIVE_NUM_JOINTS; j++) {
+            const uint16_t bit = (uint16_t)(1U << j);
+            if (!(presence & bit) || !(out.active_joint_mask & bit)) continue;
+            portENTER_CRITICAL(&s_odrv_mux);
+            bool    seen  = s_odrv_hb[j].seen;
+            uint8_t state = s_odrv_hb[j].axis_state;
+            portEXIT_CRITICAL(&s_odrv_mux);
+            if (seen && state != ODRV_AXIS_STATE_CLOSED_LOOP)
+                presence &= (uint16_t)~bit;
+        }
+    }
+#endif
     out.init_presence_mask = presence;
 }
 
@@ -865,6 +924,82 @@ bool CANInterface::sendFlipperAngles(const float target_deg[4], bool enabled) {
 #endif
 }
 
+#if ODRIVE_AUTO_RECOVER && ROBOCOREA_ROLE_IS_ARM
+// Per-joint recovery bookkeeping (control-task context).
+static uint32_t s_odrv_recover_last_ms[ODRIVE_NUM_JOINTS] = {0};
+static uint32_t s_odrv_recover_win_ms[ODRIVE_NUM_JOINTS]  = {0};
+static uint8_t  s_odrv_recover_count[ODRIVE_NUM_JOINTS]   = {0};
+
+// Re-close the loop on any armed ODrive joint that has dropped out of CLOSED_LOOP
+// (self-disarmed to IDLE on an internal fault). Runs from the control task inside
+// sendArmJoints so the re-seed and the resumed position stream stay on one task —
+// no cross-core race on the ramp/setpoint. The CAN task only PARSES the heartbeat.
+//
+// Bumpless: the recovery commands SET_INPUT_POS = the joint's CURRENT measured
+// position BEFORE requesting CLOSED_LOOP, and re-seeds the ESP-side ramp to the
+// same point, so the axis re-arms holding where it actually is (it may have sagged
+// while limp) instead of snapping to the last commanded pose. A per-joint retry
+// backoff plus a flap guard keep a persistent fault from energising/tripping forever.
+static void serviceOdriveRecovery() {
+    static constexpr float DEG2RAD  = 3.14159265359f / 180.0f;
+    static constexpr float TWO_PI_F = 6.28318530718f;
+    const uint32_t now = millis();
+
+    for (uint8_t j = 0; j < ODRIVE_NUM_JOINTS; j++) {
+        portENTER_CRITICAL(&s_odrv_mux);
+        bool     seen      = s_odrv_hb[j].seen;
+        uint8_t  state     = s_odrv_hb[j].axis_state;
+        uint32_t hb_ms     = s_odrv_hb[j].last_ms;
+        float    pos_turns = s_odrv_fb[j].pos_turns;
+        bool     pos_seen  = s_odrv_pos_seen[j];
+        portEXIT_CRITICAL(&s_odrv_mux);
+
+        if (!seen) continue;                                    // no heartbeat yet — nothing to judge
+        if (state == ODRV_AXIS_STATE_CLOSED_LOOP) {             // healthy → clear the flap guard
+            s_odrv_recover_count[j]   = 0;
+            s_odrv_recover_win_ms[j]  = 0;
+            s_odrv_recover_last_ms[j] = 0;                       // so the next trip recovers immediately
+            continue;
+        }
+        if (now - hb_ms > ODRIVE_HEARTBEAT_STALE_MS) continue;  // silent: off the bus, not an idle-drop
+
+        // Backoff between attempts (the axis needs time to actually re-arm).
+        if (s_odrv_recover_last_ms[j] != 0 &&
+            now - s_odrv_recover_last_ms[j] < ODRIVE_RECOVER_RETRY_MS) continue;
+
+        // Flap guard: cap attempts inside a rolling window so a persistent fault
+        // (e.g. regen overvoltage) can't energise/trip the joint indefinitely.
+        if (s_odrv_recover_win_ms[j] == 0 ||
+            now - s_odrv_recover_win_ms[j] > ODRIVE_RECOVER_WINDOW_MS) {
+            s_odrv_recover_win_ms[j] = now;
+            s_odrv_recover_count[j]  = 0;
+        }
+        if (s_odrv_recover_count[j] >= ODRIVE_RECOVER_MAX_ATTEMPTS) continue;  // backed off this window
+        s_odrv_recover_last_ms[j] = now;
+        s_odrv_recover_count[j]++;
+
+        // Target = where the joint actually is, then close the loop (bumpless).
+        float turns_cmd;
+        if (pos_seen) {
+            float meas_deg = (pos_turns - s_odrv_zero[j]) * 360.0f / (s_odrv_gear[j] * s_odrv_dir[j]);
+#if ARM_RAMP_ENABLE
+            if (s_arm_ramp_init) { s_arm_ramp_pos[j] = meas_deg; s_arm_ramp_vel[j] = 0.0f; }
+#endif
+            s_arm_hold_pos[j] = meas_deg;
+            turns_cmd = pos_turns;
+        } else {
+            // No live encoder yet: fall back to the last commanded output so the
+            // joint at least re-arms (there is nothing better to hold to).
+            turns_cmd = s_odrv_zero[j] +
+                        (s_arm_hold_pos[j] * DEG2RAD / TWO_PI_F) * s_odrv_gear[j] * s_odrv_dir[j];
+        }
+        odrvClearErrors(s_odrv_node[j]);
+        odrvInputPos(s_odrv_node[j], turns_cmd);   // set target BEFORE closing the loop
+        odrvAxisState(s_odrv_node[j], 8 /*CLOSED_LOOP*/);
+    }
+}
+#endif  // ODRIVE_AUTO_RECOVER && ROBOCOREA_ROLE_IS_ARM
+
 bool CANInterface::sendArmJoints(const float angles_deg_in[6]) {
 #if !ROBOCOREA_ROLE_IS_ARM
     (void)angles_deg_in;
@@ -873,6 +1008,11 @@ bool CANInterface::sendArmJoints(const float angles_deg_in[6]) {
     if (!s_ok) return false;
     if (s_arm_state != ArmState::READY) return false;   // gated: arm must be armed
     if (s_arm_estop_hold) return true;                  // e-stop hold: keep the freeze, ignore new commands
+#if ODRIVE_AUTO_RECOVER
+    // Runs every control tick (its own backoff paces the actual attempts) so a
+    // joint that dropped to IDLE recovers even between throttled command sends.
+    serviceOdriveRecovery();
+#endif
     uint32_t now = millis();
     if (s_arm_last_cmd_ms != 0 && now - s_arm_last_cmd_ms < ARM_COMMAND_PERIOD_MS)
         return true;
@@ -1080,10 +1220,17 @@ void CANInterface::poll() {
                 matched = true;
                 portENTER_CRITICAL(&s_odrv_mux);
                 switch (cmd) {
+                    case ODRV_HEARTBEAT:
+                        // axis_error (u32 LE) + axis_state (u8) — the disarm signal.
+                        s_odrv_hb[j].axis_error = (uint32_t)getInt32LE(f.data);
+                        s_odrv_hb[j].axis_state = f.data[4];
+                        s_odrv_hb[j].last_ms    = millis();
+                        s_odrv_hb[j].seen       = true; break;
                     case ODRV_GET_ENCODER:
                         s_odrv_fb[j].pos_turns   = getFloat32LE(f.data);
                         s_odrv_fb[j].vel_turns_s = getFloat32LE(f.data + 4);
-                        s_odrv_fb[j].fresh = true; break;
+                        s_odrv_fb[j].fresh = true;
+                        s_odrv_pos_seen[j] = true; break;
                     case ODRV_GET_IQ:
                         s_odrv_fb[j].iq_measured_a = getFloat32LE(f.data + 4);
                         s_odrv_fb[j].fresh = true; break;

@@ -328,6 +328,27 @@
 //                0 = request AXIS_STATE_IDLE like the working Dicerox firmware.
 #define ODRIVE_ESTOP_USE_NATIVE   0
 
+// ── ODrive closed-loop supervision & auto-recovery ───────────────────────────
+// An ODrive disarms ITSELF to AXIS_STATE_IDLE on an internal fault (regen
+// overvoltage, overcurrent, encoder/spinout, …) but keeps broadcasting its
+// heartbeat — so the joint reads "present" (green) while hanging limp and
+// ignoring SET_INPUT_POS. These options parse the heartbeat's axis_state and,
+// while armed, clear the error + re-close the loop bumplessly (target = current
+// measured position) so a tripped joint recovers on its own instead of needing a
+// full power cycle. See CANInterface.cpp.
+#define ODRIVE_AUTO_RECOVER          1    // re-close the loop if an armed joint drops out of CLOSED_LOOP
+#define ODRIVE_HEARTBEAT_STALE_MS    500  // heartbeat older than this → joint off the bus, not an idle-drop
+#define ODRIVE_RECOVER_RETRY_MS      500  // min interval between recovery attempts per joint
+#define ODRIVE_RECOVER_MAX_ATTEMPTS    6  // attempts allowed inside the window before backing off (flap guard)
+#define ODRIVE_RECOVER_WINDOW_MS    5000  // flap-guard window: a persistent fault can't energise/trip forever
+#define ODRIVE_GREEN_MEANS_CLOSED_LOOP 1  // GUI presence bit for J1–J3 requires an observed CLOSED_LOOP state
+// Gate arm bring-up READY on an OBSERVED CLOSED_LOOP heartbeat: an encoder read
+// answers even in IDLE, so it is not proof the axis armed (the false-success that
+// made re-arm silently "succeed" on a still-idle joint). Requires the ODrive CAN
+// heartbeat to be enabled (it is by default). Set 0 to fall back to encoder-only.
+#define ODRIVE_CONFIRM_CLOSED_LOOP     1
+#define ODRIVE_CLOSED_LOOP_TIMEOUT_MS 400 // wait this long for a CLOSED_LOOP heartbeat during arming (per try)
+
 // ─── Arm: ZE300 (J4) ─────────────────────────────────────────────────────────
 // Standard 11-bit. Tagged request ID = ZE300_REQ_ID_BASE | device_id; reply ID = device_id.
 // Command in output degrees; driver handles its 1:8 gearbox (16384 counts/output-rev).
