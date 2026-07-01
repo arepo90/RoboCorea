@@ -627,6 +627,13 @@ void DashboardPanel::onAutonomyStateUpdated(bool enabled)
 void DashboardPanel::onAudioToggled(bool checked)
 {
     if (audio_btn_) audio_btn_->setText(checked ? "ON" : "OFF");
+    // The one toggle drives both halves of the speech feature: speaker
+    // monitoring (below, via the signal) and Vosk transcription (here). When
+    // turned off, stop feeding Vosk and clear the stale transcript.
+    if (speech_processor_) {
+        speech_processor_->setEnabled(checked);
+        if (!checked) speech_processor_->clearTranscription();
+    }
     emit audioMonitorToggled(checked);
 }
 

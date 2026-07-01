@@ -97,6 +97,7 @@ void SpeechProcessor::clearTranscription()
 
 void SpeechProcessor::pushAudio(const int16_t* pcm, size_t samples)
 {
+    if (!enabled_.load()) return;  // transcription toggled off (default at startup)
     if (!pcm || samples == 0) return;
 
     std::lock_guard<std::mutex> lock(recognizer_mutex_);

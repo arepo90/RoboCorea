@@ -14,8 +14,8 @@ set -euo pipefail
 
 # --- Configuration ------------------------------------------------------------
 CAMERAS=(
-    #"/dev/video2;8890;hw:CARD=C920,DEV=0"   # Example: video + mic (A/V)
-    "/dev/video2;8890;hw:CARD=C920,DEV=0"                      # Current: video only
+    "/dev/video2;8890;hw:CARD=C920,DEV=0"    # Current: video + C920 mic (A/V)
+    #"/dev/video2;8890;"                     # Alt: video only (no audio)
 )
 
 WIDTH=1280

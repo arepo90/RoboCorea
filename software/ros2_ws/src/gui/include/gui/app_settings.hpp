@@ -59,8 +59,10 @@ struct AppSettings {
     std::atomic<int> label_font_scale_x100{80};
 
     // ── Audio / speech (SpeechProcessor) ─────────────────────────────────────
-    // Whether the operator's speakers monitor the robot mic on startup.
-    std::atomic<bool> audio_start_enabled{true};
+    // Startup state of the speech feature (the single dashboard toggle):
+    // speaker monitoring of the robot mic AND live Vosk transcription. Off by
+    // default — the operator turns it on when they want to listen/transcribe.
+    std::atomic<bool> audio_start_enabled{false};
     // Comma-separated Vosk vocabulary; empty = unrestricted recognition.
     std::mutex   strings_mutex;
     std::string  vosk_grammar;
