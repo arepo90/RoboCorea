@@ -23,6 +23,15 @@ SourceManager::SourceManager(rclcpp::Node::SharedPtr node,
         [this](const std_msgs::msg::String::SharedPtr msg) {
             onConfigReceived(msg);
         });
+
+    // /robot/camera_streams (latched JSON) is the robot's camera_streamer node
+    // advertising its auto-detected SRT cameras (name + port). Late-joining GUIs
+    // get the current list immediately; hot-plugged cameras arrive as updates.
+    camera_streams_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/robot/camera_streams", qos,
+        [this](const std_msgs::msg::String::SharedPtr msg) {
+            onCameraStreamsReceived(msg);
+        });
 }
 
 SourceManager::~SourceManager()
@@ -184,6 +193,33 @@ void SourceManager::onConfigReceived(const std_msgs::msg::String::SharedPtr msg)
     emit sourcesUpdated();
 }
 
+void SourceManager::onCameraStreamsReceived(const std_msgs::msg::String::SharedPtr msg)
+{
+    // { "cameras": [ {"name": "...", "port": 8900}, ... ] } — video-only SRT
+    // streams the robot auto-detected. The A/V primary (C920) is intentionally
+    // NOT here; it stays a static A/V source (AppSettings + GstAvStream).
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(msg->data));
+
+    std::vector<std::pair<std::string, int>> cams;
+    if (doc.isObject()) {
+        for (const auto& v : doc.object().value("cameras").toArray()) {
+            if (!v.isObject()) continue;
+            QJsonObject c = v.toObject();
+            const int port = c.value("port").toInt(0);
+            const std::string name = c.value("name").toString().toStdString();
+            if (port > 0 && !name.empty())
+                cams.emplace_back(name, port);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(dyn_mutex_);
+        dynamic_cameras_ = std::move(cams);
+    }
+    rebuildSourceList();
+    emit sourcesUpdated();
+}
+
 void SourceManager::rebuildSourceList()
 {
     QStringList names, ids;
@@ -200,12 +236,29 @@ void SourceManager::rebuildSourceList()
         }
     }
 
-    // C920 SRT streams from the Jetson.
+    // C920 SRT streams from the Jetson (static AppSettings config).
     {
         std::lock_guard<std::mutex> lock(net_mutex_);
         for (const auto& [name, id] : network_streams_) {
             names << QString::fromStdString(name);
             ids << QString::fromStdString(id);
+        }
+    }
+
+    // Robot-advertised, auto-detected SRT cameras (camera_streamer node). Built
+    // into "gst:" receive pipelines with the configured Jetson host + latency.
+    {
+        std::string host;
+        {
+            std::lock_guard<std::mutex> lk(AppSettings::instance().video_mutex);
+            host = AppSettings::instance().default_robot_host;
+        }
+        std::lock_guard<std::mutex> lock(dyn_mutex_);
+        for (const auto& [name, port] : dynamic_cameras_) {
+            if (host.empty()) break;   // nothing to connect to yet
+            names << QString::fromStdString(name);
+            ids << QString::fromStdString(
+                "gst:" + buildSrtRxPipeline(host, port, /*latency_ms=*/120));
         }
     }
 

@@ -43,10 +43,16 @@ void AppSettings::load()
         label_font_scale_x100.store(o["label_font_scale_x100"].toInt());
     if (o.contains("audio_start_enabled"))
         audio_start_enabled.store(o["audio_start_enabled"].toBool());
+    if (o.contains("talkback_start_enabled"))
+        talkback_start_enabled.store(o["talkback_start_enabled"].toBool());
+    if (o.contains("talkback_opus_kbps"))
+        talkback_opus_kbps.store(o["talkback_opus_kbps"].toInt(24));
     {
         std::lock_guard<std::mutex> lk(strings_mutex);
         if (o.contains("vosk_grammar"))
             vosk_grammar = o["vosk_grammar"].toString().toStdString();
+        if (o.contains("mic_device"))
+            mic_device = o["mic_device"].toString().toStdString();
     }
 
     // PPM calibration: flat array of 18 (6 channels × {min, neutral, max}).
@@ -67,6 +73,12 @@ void AppSettings::load()
     std::lock_guard<std::mutex> lk(video_mutex);
     if (o.contains("default_robot_host"))
         default_robot_host = o["default_robot_host"].toString().toStdString();
+    if (o.contains("talkback_host"))
+        talkback_host = o["talkback_host"].toString().toStdString();
+    if (o.contains("talkback_port"))
+        talkback_port = o["talkback_port"].toInt(8892);
+    if (o.contains("talkback_latency_ms"))
+        talkback_latency_ms = o["talkback_latency_ms"].toInt(120);
 
     if (o.contains("video_streams") && o["video_streams"].isArray()) {
         std::vector<VideoStream> loaded;
@@ -95,10 +107,13 @@ void AppSettings::save()
     o["thermal_upscale_w"]     = thermal_upscale_w.load();
     o["thermal_upscale_h"]     = thermal_upscale_h.load();
     o["label_font_scale_x100"] = label_font_scale_x100.load();
-    o["audio_start_enabled"]   = audio_start_enabled.load();
+    o["audio_start_enabled"]     = audio_start_enabled.load();
+    o["talkback_start_enabled"]  = talkback_start_enabled.load();
+    o["talkback_opus_kbps"]      = talkback_opus_kbps.load();
     {
         std::lock_guard<std::mutex> lk(strings_mutex);
         o["vosk_grammar"] = QString::fromStdString(vosk_grammar);
+        o["mic_device"]   = QString::fromStdString(mic_device);
     }
 
     {
@@ -115,7 +130,10 @@ void AppSettings::save()
 
     {
         std::lock_guard<std::mutex> lk(video_mutex);
-        o["default_robot_host"] = QString::fromStdString(default_robot_host);
+        o["default_robot_host"]   = QString::fromStdString(default_robot_host);
+        o["talkback_host"]        = QString::fromStdString(talkback_host);
+        o["talkback_port"]        = talkback_port;
+        o["talkback_latency_ms"]  = talkback_latency_ms;
         QJsonArray arr;
         for (const auto& vs : video_streams) {
             QJsonObject s;

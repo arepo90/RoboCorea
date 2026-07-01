@@ -366,6 +366,25 @@ class ESP32BridgeNode(Node):
         self._last_arm_state = None
         self._last_arm_mode = None
 
+        # Publish a SAFE baseline immediately so a fresh GUI can't inherit a stale
+        # latched sample from a previous session (the per-host Zenoh router keeps
+        # transient_local samples across bridge restarts). Without this, a GUI that
+        # joins before the arm PCB reports could show the last run's "READY /
+        # all-joints-present". These are overwritten within one lifecycle frame once
+        # the arm actually reports, so UNINIT/empty is only shown until then.
+        self._pub_arm_state.publish(String(data='UNINIT'))
+        self._pub_arm_fault.publish(Bool(data=False))
+        self._pub_arm_presence.publish(UInt16(data=0))
+        self._pub_arm_mode.publish(String(data='DEXTERITY'))
+        self._pub_arm_active.publish(UInt8(data=0))
+
+        # Arm-link watchdog: the arm PCB streams lifecycle frames at ~10 Hz, so if
+        # none arrive for a while the whole arm board is gone (unplugged / crashed).
+        # Re-assert the safe baseline in that case so the GUI stops showing the last
+        # reported state (e.g. READY + joints present) as if it were still current.
+        self._arm_last_lifecycle = 0.0
+        self._arm_link_offline = True   # until the first lifecycle frame arrives
+
         # Services
         self.create_service(Trigger, '/arm/arm', self._srv_arm)
         self.create_service(Trigger, '/arm/disarm', self._srv_disarm)
@@ -390,6 +409,7 @@ class ESP32BridgeNode(Node):
         self.create_subscription(UInt8, '/sensors/enable_mask', self._on_enable_mask, latched_qos)
         # Watchdog: release the tracks back to RC if /cmd_vel goes stale.
         self.create_timer(0.1, self._cmd_vel_watchdog)
+        self.create_timer(0.5, self._arm_link_watchdog)
         self._publish_autonomy_state()
         if self._autonomy_enabled:
             self.get_logger().warn(
@@ -819,6 +839,9 @@ class ESP32BridgeNode(Node):
     def _handle_arm_lifecycle(self, payload: bytes):
         if len(payload) < 7:
             return
+        # Arm link is alive — stamp it so the watchdog doesn't wipe the state.
+        self._arm_last_lifecycle = time.monotonic()
+        self._arm_link_offline = False
         state, fault_code, can_fail, motor_fail, eflg = struct.unpack('<BBHHB', payload[:7])
         presence = 0
         if len(payload) >= 9:
@@ -849,6 +872,26 @@ class ESP32BridgeNode(Node):
         am = UInt8()
         am.data = active_mask
         self._pub_arm_active.publish(am)
+
+    def _arm_link_watchdog(self):
+        # No lifecycle frame for ~1.5 s => the arm PCB is gone. Re-assert the safe
+        # baseline once (not every tick) so the GUI doesn't keep showing a frozen
+        # READY / joints-present from before the disconnect. Recovers automatically
+        # when frames resume (_handle_arm_lifecycle clears _arm_link_offline).
+        if self._arm_link_offline:
+            return
+        if time.monotonic() - self._arm_last_lifecycle < 1.5:
+            return
+        self._arm_link_offline = True
+        self.get_logger().warn('arm lifecycle stream lost (>1.5 s) — arm PCB '
+                               'disconnected? resetting /arm/* to UNINIT baseline')
+        self._last_arm_state = None
+        self._last_arm_mode = None
+        self._pub_arm_state.publish(String(data='UNINIT'))
+        self._pub_arm_fault.publish(Bool(data=False))
+        self._pub_arm_presence.publish(UInt16(data=0))
+        self._pub_arm_mode.publish(String(data='DEXTERITY'))
+        self._pub_arm_active.publish(UInt8(data=0))
 
     # Arm-PCB passive sensors (I2C, read on the arm ESP32).
     def _handle_mag(self, payload: bytes):

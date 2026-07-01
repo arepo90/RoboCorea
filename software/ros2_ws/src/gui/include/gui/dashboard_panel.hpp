@@ -19,7 +19,9 @@
 
 #include <atomic>
 
+class QTabWidget;
 class QTextEdit;
+class MagPlot;
 class SpeechProcessor;
 
 // Right-column dashboard: connection/heartbeat + uptime, a magnetometer readout
@@ -51,7 +53,8 @@ signals:
     void resetSourcesRequested();
     void settingsRequested();
     void systemsRequested();   // open the Robot Systems window (toolbar icon)
-    void audioMonitorToggled(bool enabled);  // → GstAvStream playback
+    void audioMonitorToggled(bool enabled);  // → GstAvStream playback (robot mic → speaker)
+    void talkbackToggled(bool enabled);      // → GstMicSender (operator mic → robot speaker)
     void magnetometerUpdated(double x, double y, double z);
     void imuUpdated(double yaw, double pitch, double roll);
     void telemetryReceived();   // heartbeat
@@ -73,6 +76,7 @@ private slots:
     void onAutonomyToggled(bool checked);
     void onAutonomyStateUpdated(bool enabled);
     void onAudioToggled(bool checked);
+    void onTalkbackToggled(bool checked);
     void onTranscriptionUpdated(const QString& text);
     void onMagnetometerUpdated(double x, double y, double z);
     void onImuUpdated(double yaw, double pitch, double roll);
@@ -98,6 +102,10 @@ private:
     void publishSensorMask();
     void callArmTrigger(const rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr& cli,
                         const char* what);
+    // Recolor the per-joint CAN dots from the latest presence mask, but only
+    // treat them as meaningful when the link is live AND the arm is up — so a
+    // stale latched "all present" (or a dropped link) never shows misleading green.
+    void updateArmCanDots();
 
     rclcpp::Node::SharedPtr node_;
 
@@ -113,10 +121,12 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr telemetry_sub_;
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr vesc_sub_;
 
-    // Magnetometer
-    QLabel* mag_x_;
-    QLabel* mag_y_;
-    QLabel* mag_z_;
+    // Magnetometer — numeric readout (Values tab) + live strip chart (Graph tab)
+    QTabWidget* mag_tabs_{nullptr};
+    QLabel*     mag_x_;
+    QLabel*     mag_y_;
+    QLabel*     mag_z_;
+    MagPlot*    mag_plot_{nullptr};
 
     // Orientation (from the ZED2 IMU)
     QLabel* imu_yaw_;
@@ -125,7 +135,8 @@ private:
 
     // Speech / audio monitor
     QTextEdit*       transcription_{nullptr};
-    QPushButton*     audio_btn_{nullptr};
+    QPushButton*     audio_btn_{nullptr};   // robot mic → laptop speaker + transcription
+    QPushButton*     talk_btn_{nullptr};    // laptop mic → robot speaker (talkback)
     SpeechProcessor* speech_processor_{nullptr};
 
     rclcpp::Subscription<sensor_msgs::msg::MagneticField>::SharedPtr mag_sub_;
@@ -167,6 +178,8 @@ private:
     QString      arm_state_{"UNINIT"};
     QString      arm_mode_{"DEXTERITY"};
     bool         auto_arm_prompted_{false};   // one-shot startup arm prompt
+    int          arm_presence_mask_{0};       // latest /arm/can_presence bits
+    bool         link_online_{false};         // chassis heartbeat fresh (gates the dots)
 
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr arm_state_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr arm_mode_sub_;

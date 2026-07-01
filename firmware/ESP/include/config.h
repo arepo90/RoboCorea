@@ -414,6 +414,17 @@
 #define ARM_CAN_FAIL_THRESHOLD    5    // failed arm-send cycles in the window → CAN fault
 #define ARM_MOTOR_FAIL_THRESHOLD  3    // (reserved) motor-command failures → fault
 
+// Real-time per-joint CAN liveness. The reported presence mask (init_presence_mask)
+// is downgraded live: a joint that was captured at arm time but has not been HEARD
+// on the bus within this window is cleared from the mask, so the GUI's per-joint
+// CAN dots reflect the CURRENT state (a joint that drops off mid-session goes
+// un-green) instead of a frozen arm-time snapshot. Only applied to joints that are
+// currently ACTIVE (active_joint_mask) — idle joints (e.g. J5/J6 in CHASSIS mode)
+// are not commanded, so they legitimately go quiet and keep their captured bit.
+// All active joints emit frames every ARM_COMMAND_PERIOD_MS (ODrive telemetry,
+// ZE300 realtime-state read, LKTech command replies), so a few periods is safe.
+#define ARM_JOINT_STALE_MS      600    // >~12 command periods; 0 disables the downgrade
+
 // First ZE300 (J4) command after arming is clamped to ±this from captured zero,
 // to catch a bad startup pose before a large move.
 #define ARM_JOINT4_FIRST_CMD_MAX_DEG  30.0f

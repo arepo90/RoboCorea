@@ -45,12 +45,16 @@ private:
 
     // Snapshot taken at dialog open — used by Reset to undo any Apply
     bool        orig_audio_enabled_;
+    bool        orig_talkback_enabled_;
     int         orig_colormap_, orig_interp_, orig_upscale_w_, orig_upscale_h_;
     int         orig_font_scale_x100_;
     std::string orig_grammar_;
+    std::string orig_mic_device_;
 
     // Widgets
     QCheckBox* audio_check_;
+    QCheckBox* talkback_check_;   // enable operator→robot talkback at startup
+    QLineEdit* mic_device_edit_;  // talkback capture device (empty = default)
     QLineEdit* grammar_edit_;
     QComboBox* colormap_combo_;
     QComboBox* interp_combo_;

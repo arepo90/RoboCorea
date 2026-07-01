@@ -584,12 +584,21 @@ hardware and the operator network. Planned nodes:
   Field`), and relays `/sensors/enable_mask` (bit0 mag, bit1 thermal) down as
   `MSG_SENSOR_ENABLE`. *(There is no longer a separate `jetson_sensors` package —
   the Jetson I2C path was removed.)*
-- **C920 SRT streamer** (`gui/scripts/c920_srt_stream.sh`, a GStreamer pipeline,
-  **not** a ROS node). One pipeline per C920: the camera's **onboard H.264** (and
-  the front camera's mic as **Opus**) muxed into MPEG-TS and sent over **SRT** to
-  the workstation GUI. The Orin Nano has **no NVENC**, so nothing is *encoded* on
-  the Jetson — the C920 encodes H.264 itself and the Jetson just packetizes
-  (near-zero CPU). See §11.1 and the gui README.
+- **`camera_streamer`** *(implemented, `rescue_bringup camera_streamer`,
+  `camera-streamer.service`)*. Auto-detects **every** USB UVC camera (a GStreamer
+  pipeline per camera, video-only H.264/MPEG-TS over **SRT** to the GUI), gives the
+  **primary C920** (matched by name) its mic as **Opus** on port 8890 (the A/V
+  stream the GUI decodes for speaker + Vosk), and **taps the ZED**: since the ZED
+  SDK grabs the device exclusively, the node re-encodes the SDK's published left
+  image (`/zed/zed_node/left/image_rect_color`) to its own SRT stream (HW
+  `nvv4l2h264enc` if present, else `x264enc`), running alongside the SDK. It
+  advertises the live video-only list (name + port) on a latched
+  **`/robot/camera_streams`** so the GUI auto-populates its source dropdown and
+  picks up hot-plugged cameras; a periodic rescan handles plug/unplug. Extra cams
+  get ports from 8900 up, the ZED tap 8899. The video rides SRT (not DDS/Zenoh) —
+  only the ZED tap + catalog are ROS. Replaces the old `c920_srt_stream.sh` +
+  `c920-stream.service` (the script is kept as a manual single-camera fallback).
+  See §11.1 and the gui README.
 - **`dicerox_mapping`** *(implemented)*. 2D SLAM front-end + mapper. Projects the
   ZED2 VIO into a planar `/filtered_odom` (`zed_planar_odom`), reframes the RPLidar
   `/scan` into `base_laser` (`scan_frame_republisher`), and runs `slam_toolbox`
@@ -674,7 +683,7 @@ both are visible at once under the twin.)
 |-------|------|
 | `MainWindow` | Owns panels; publishes `/robot/ppm_calib`; opens `SettingsDialog`. |
 | `CameraHub` | Ref-counted frame provider keyed by source URI — one decode per source, shared by widgets, auto-reconnecting. Opens `local:N` (V4L2) and `gst:<pipe>` (GStreamer/SRT); also hosts externally-registered A/V sources (`av:<i>`, see `GstAvStream`). |
-| `SourceManager` | Discovers sources: local webcams (`probeLocalCameras`), the configured **C920 SRT streams** (from `AppSettings`), and thermal ROS topics (`probeThermalTopics` + a `/config` subscription). Emits `sourcesUpdated`. |
+| `SourceManager` | Discovers sources: local webcams (`probeLocalCameras`), the static **A/V C920** (from `AppSettings`), the robot's **auto-detected SRT cameras** (latched **`/robot/camera_streams`** from the `camera_streamer` node → `gst:` sources, incl. the ZED tap), and thermal ROS topics (`probeThermalTopics` + a `/config` subscription). Emits `sourcesUpdated`. |
 | `VideoPanel` / `VideoWidget` | 2×2 grid of feeds; click-to-enlarge; each widget runs its own filter pipeline on a worker thread and can select any source (incl. thermal). An enlarged cell supports **zoom + pan** (on-screen +/−/Fit buttons or Ctrl+scroll to zoom — trackpad pinch only on Wayland, not X11; two-finger scroll / drag to pan), applied as an ROI crop+upscale of the source frame **before** the filter pipeline (so the CV runs on the zoomed region); resets to fit on collapse. |
 | `FilterRegistry` / `filters` | Self-registering CV filters with a thread-safe `FilterConfig` (atomics). Per-widget instances. |
 | `OdometryPanel` | Track speeds, **track wheel-odometry (x/y/yaw/vx from `/odom/wheel`)**, 4 flipper angles, **per-VESC rows (the six VESC IDs)**, and arm telemetry (ODrive/LKTech/ZE300). |
@@ -687,6 +696,7 @@ both are visible at once under the twin.)
 | `DigitalTwinPanel` / `UrdfViewer` | OpenGL 3-D view of the **combined** arm + chassis + flipper URDF, posed from `/joint_states` (arm joints from `servo_node`, flipper joints from `flipper_state`). |
 | `ArmPosePanel` | Saved-pose controls under the twin: a thin client of the `servo_node` save/go/delete/list services with inline per-pose twin thumbnails. Mirrors the pose-name list + selection to `~/.config/robocorea_gui/saved_poses.json` and renders to `pose_thumbs/` so the dropdown is populated at launch before the servo connects (server stays authoritative, §12). |
 | `GstAvStream` | Native-GStreamer receiver for the front C920's **A/V SRT** stream: `srtsrc ! tsdemux` → video appsink (shown via `CameraHub`) + `opusdec ! tee` → speakers **and** an appsink feeding `SpeechProcessor`. Auto-reconnects. |
+| `GstMicSender` | Reverse of `GstAvStream` — the operator→robot **talkback** sender: captures the workstation mic → `opusenc ! mpegtsmux ! srtsink(caller)` to the robot, which plays it on a Jetson speaker (`gui/scripts/jetson_speaker_sink.sh`, `jetson-speaker.service`). Gated by the dashboard **Talkback** toggle (mic only open while ON); auto-reconnects. Robot speaker hardware (Bluetooth/USB) is TBD — it's just the sink element in the robot-side script, so nothing in the GUI changes when it's chosen. |
 | `SpeechProcessor` | Vosk transcription, fed 16 kHz PCM by `GstAvStream` (the C920 A/V stream's Opus track) via `pushAudio()`. |
 | `SettingsDialog` / `PpmCalibDialog` | Robot config: PPM calibration + deadband, thermal colormap/interp, detection-label scale. (No keybind editor — the RC control scheme is fixed, §13.2.) |
 
@@ -1107,7 +1117,8 @@ arm PCB and republished here — no separate sensor node):
 ros2 launch esp32_bridge esp32_bridge.launch.py
 # Optional explicit bench override:
 # ros2 launch esp32_bridge esp32_bridge.launch.py serial_port:=/dev/serial/by-id/usb-...
-./software/ros2_ws/src/gui/scripts/c920_srt_stream.sh   # C920 H.264 (+Opus) → SRT; edit devices/ports at top
+ros2 run rescue_bringup camera_streamer                 # auto-detect USB cams + ZED tap → SRT; advertises /robot/camera_streams
+#   (or camera-streamer.service; c920_srt_stream.sh is the manual single-cam fallback)
 # Autonomy (2D PoC): build a map, then navigate a known map. ZED + RPLidar drivers
 # are external sensor bring-up (run the ZED wrapper with publish_tf:=false).
 #   ros2 launch rescue_nav real_mapping.launch.py            # unknown arena → build map
@@ -1195,12 +1206,23 @@ Things that are **not yet pinned down** and must be resolved on real hardware:
     muxed into that camera's A/V **SRT** stream; the GUI decodes it (GStreamer),
     plays it, and runs **Vosk** transcription. Replaces the legacy
     raw-PCM-over-DDS `/audio` path (lossy + laggy). Drop a Vosk model into
-    `gui/assets/audio/` to enable transcription.
-11. **Video/audio SRT link.** *Decided:* C920 onboard H.264 (+ front-cam Opus) →
-    SRT → GUI; RF cams stay analog for driving. Set the Jetson IP + per-camera
-    SRT ports in the GUI settings and `c920_srt_stream.sh`, and bench-test
-    bitrate / keyframe interval / SRT latency under a degraded link. CV (YOLO
-    hazmat) runs on the clean C920 streams, not the RF driving cams.
+    `gui/assets/audio/` to enable transcription. *Also implemented:* two-way
+    **talkback** — the workstation mic → Opus/MPEG-TS → **SRT** (port 8892) →
+    robot, played on a Jetson speaker (`jetson_speaker_sink.sh` /
+    `jetson-speaker.service`), driven by the dashboard **Talkback** toggle
+    (`GstMicSender`). *Pending:* the robot speaker hardware — a paired+trusted
+    **Bluetooth** speaker (default sink, auto-reconnects in range) or a **USB**
+    speaker; it's a one-line `SINK=` change in the robot-side script, so the GUI
+    and stream are unaffected by the decision.
+11. **Video/audio SRT link.** *Decided + built:* the `camera_streamer` node
+    auto-detects **every** USB camera and streams each over SRT (video-only), gives
+    the primary C920 its Opus mic (A/V, port 8890), and taps the ZED's published
+    left image into its own SRT stream (runs alongside the SDK, which owns the
+    device). It advertises the live list on **`/robot/camera_streams`** so the GUI
+    populates its source dropdown automatically (hot-plug aware) — only the Jetson
+    IP (`default_robot_host`) needs setting in the GUI. RF cams stay analog for
+    driving. Bench-test bitrate / keyframe interval / SRT latency under a degraded
+    link. CV (YOLO hazmat) runs on the clean C920/USB streams, not the RF driving cams.
 
 12. **Odometry fusion (EKF built; map-frame EKF deferred).** *Decided + built:* a
     **`robot_localization` EKF** in `rescue_nav` fuses the bridge's `/odom/wheel`

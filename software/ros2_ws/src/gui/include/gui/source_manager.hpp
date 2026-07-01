@@ -21,7 +21,7 @@ class CameraHub;
 // scheme understood by CameraHub / VideoWidget:
 //   ""              → None
 //   "local:N"       → V4L2 /dev/videoN (RF driving cams, USB webcams)
-//   "gst:<pipe>"    → GStreamer pipeline (the C920 SRT streams)
+//   "gst:<pipe>"    → GStreamer pipeline (C920 SRT + robot-advertised SRT cams)
 //   "topic:/foo"    → generic sensor_msgs/Image topic
 //   "thermal:/foo"  → thermal sensor_msgs/Image topic (colormapped on display)
 class SourceManager : public QObject {
@@ -50,11 +50,14 @@ private:
     void probeThermalTopics();   // ROS introspection fallback for thermal sources
     void buildNetworkStreams();  // from AppSettings::video_streams
     void onConfigReceived(const std_msgs::msg::String::SharedPtr msg);
+    void onCameraStreamsReceived(const std_msgs::msg::String::SharedPtr msg);
     void rebuildSourceList();
 
     rclcpp::Node::SharedPtr node_;
     std::shared_ptr<CameraHub> camera_hub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr config_sub_;
+    // Robot-advertised, auto-detected SRT cameras (camera_streamer node).
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr camera_streams_sub_;
 
     mutable std::mutex mutex_;
     QStringList source_names_;
@@ -65,6 +68,11 @@ private:
 
     std::mutex net_mutex_;
     std::vector<std::pair<std::string, std::string>> network_streams_;  // (name, id)
+
+    // Dynamic SRT cameras advertised by the robot's camera_streamer node
+    // (name, port). Turned into "gst:" sources at rebuild using default_robot_host.
+    std::mutex dyn_mutex_;
+    std::vector<std::pair<std::string, int>> dynamic_cameras_;
 
     std::mutex config_mutex_;
     std::vector<std::string> config_topics_;

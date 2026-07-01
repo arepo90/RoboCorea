@@ -1,6 +1,13 @@
 #!/bin/bash
 # srt_stream.sh — runs on the ROBOT (Jetson Orin Nano)
 # =========================================================
+# DEPRECATED as the default streamer: the always-on path is now the ROS node
+# `rescue_bringup camera_streamer` (camera-streamer.service), which auto-detects
+# every USB camera, taps the ZED, and advertises them to the GUI on
+# /robot/camera_streams. This script is kept as a zero-ROS MANUAL fallback for a
+# quick one-camera test (edit CAMERAS below). Don't run it at the same time as
+# camera-streamer.service — they would both bind the same SRT ports.
+#
 # Streams a standard webcam to the operator workstation over SRT, and (optionally)
 # muxes a microphone into the same stream as Opus audio.
 #

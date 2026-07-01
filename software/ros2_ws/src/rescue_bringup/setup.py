@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'robot_manager = rescue_bringup.robot_manager:main',
             'map_manager = rescue_bringup.map_manager:main',
+            'camera_streamer = rescue_bringup.camera_streamer:main',
         ],
     },
 )

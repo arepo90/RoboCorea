@@ -172,6 +172,16 @@ static uint8_t canBackendEflg() {
 // ─── State + small helpers ────────────────────────────────────────────────────
 static bool s_ok = false;
 static uint16_t s_arm_presence_mask = 0;
+// Last time (ms) each arm joint J1..J6 was heard on the CAN bus. Used to downgrade
+// the presence mask live so a joint that drops off mid-session stops reading as
+// present (see getArmLifecycle + ARM_JOINT_STALE_MS). 0 = never heard this arm.
+static uint32_t s_arm_joint_heard_ms[6] = {0};
+
+static inline void markArmJoint(uint8_t j) {
+    if (j >= 6) return;
+    s_arm_presence_mask |= (uint16_t)(1U << j);
+    s_arm_joint_heard_ms[j] = millis();
+}
 
 static inline float clampf(float v, float lo, float hi) {
     return (v < lo) ? lo : (v > hi) ? hi : v;
@@ -227,16 +237,16 @@ static void noteArmPresenceFromRxFrame(const CanFrame& f) {
 
     const uint32_t id = f.id;
     const uint8_t odrv_node = (uint8_t)((id >> 5) & 0x3F);
-    if (odrv_node == ODRIVE_NODE_J1) s_arm_presence_mask |= (uint16_t)(1U << 0);
-    if (odrv_node == ODRIVE_NODE_J2) s_arm_presence_mask |= (uint16_t)(1U << 1);
-    if (odrv_node == ODRIVE_NODE_J3) s_arm_presence_mask |= (uint16_t)(1U << 2);
+    if (odrv_node == ODRIVE_NODE_J1) markArmJoint(0);
+    if (odrv_node == ODRIVE_NODE_J2) markArmJoint(1);
+    if (odrv_node == ODRIVE_NODE_J3) markArmJoint(2);
 
     if (id == (uint32_t)ZE300_ID_J4)
-        s_arm_presence_mask |= (uint16_t)(1U << 3);
+        markArmJoint(3);
     if (id == (uint32_t)(LKTECH_ID_BASE + LKTECH_ID_J5))
-        s_arm_presence_mask |= (uint16_t)(1U << 4);
+        markArmJoint(4);
     if (id == (uint32_t)(LKTECH_ID_BASE + LKTECH_ID_J6))
-        s_arm_presence_mask |= (uint16_t)(1U << 5);
+        markArmJoint(5);
 }
 
 // Blocking receive of one frame matching a predicate, until timeout_ms.
@@ -657,6 +667,7 @@ static bool armArmInternal() {
     s_arm_can_fail   = 0;
     s_arm_motor_fail = 0;
     s_arm_presence_mask = 0;
+    for (uint8_t j = 0; j < 6; j++) s_arm_joint_heard_ms[j] = 0;
     s_arm_fail_win   = 0;
     s_arm_estop_hold = false;   // a fresh arm clears any lingering e-stop hold
     bool ok = true;
@@ -670,7 +681,7 @@ static bool armArmInternal() {
         float zero = 0.0f; bool zeroed = false;
         zeroed = odrvInitAndReadZero(s_odrv_node[j], zero);
         s_odrv_zero[j] = zeroed ? zero : 0.0f;
-        if (zeroed) s_arm_presence_mask |= (uint16_t)(1U << j);
+        if (zeroed) markArmJoint(j);
         if (!zeroed && failed_stage == 0) failed_stage = 10 + j;  // 10..12 = ODrive J1..J3
         ok &= zeroed;
     }
@@ -685,7 +696,7 @@ static bool armArmInternal() {
             zeroed = lkReadMultiAngle(s_lk_id[j], zero);
         }
         s_lk_zero_cdeg[j] = zeroed ? zero : 0;
-        if (zeroed) s_arm_presence_mask |= (uint16_t)(1U << (4 + j));
+        if (zeroed) markArmJoint(4 + j);
         if (!zeroed && failed_stage == 0) failed_stage = 20 + j;  // 20..21 = LKTech J5..J6
         ok &= zeroed;
         if (zeroed && s_arm_mode == ArmOperatingMode::DEXTERITY) {
@@ -704,7 +715,7 @@ static bool armArmInternal() {
                     zeReadAbsAngles(ZE300_ID_J4, counts);
         }
         if (ready) s_ze_zero_counts = counts;
-        if (ready) s_arm_presence_mask |= (uint16_t)(1U << 3);
+        if (ready) markArmJoint(3);
         if (!ready && failed_stage == 0) failed_stage = 30;       // ZE300 J4
         ok &= ready;
     }
@@ -775,10 +786,28 @@ void CANInterface::getArmLifecycle(ArmLifecyclePayload& out) {
     out.can_fail_count   = s_arm_can_fail;
     out.motor_fail_count = s_arm_motor_fail;
     out.eflg             = s_ok ? canBackendEflg() : 0;
-    out.init_presence_mask = s_arm_presence_mask;
     out.operating_mode     = (uint8_t)s_arm_mode;
     if (s_arm_state != ArmState::READY) out.active_joint_mask = 0;
     else out.active_joint_mask = (s_arm_mode == ArmOperatingMode::DEXTERITY) ? 0x3F : 0x0F;
+
+    // Live presence: start from the arm-time snapshot, then clear any ACTIVE joint
+    // that has gone silent longer than ARM_JOINT_STALE_MS, so a joint that drops
+    // off the bus mid-session reads as absent instead of frozen-green. Idle joints
+    // (not in active_joint_mask — e.g. J5/J6 in CHASSIS) are left as captured: they
+    // are intentionally uncommanded and legitimately quiet.
+    uint16_t presence = s_arm_presence_mask;
+#if ARM_JOINT_STALE_MS > 0
+    if (s_arm_state == ArmState::READY) {
+        const uint32_t now = millis();
+        for (uint8_t j = 0; j < 6; j++) {
+            const uint16_t bit = (uint16_t)(1U << j);
+            if (!(presence & bit) || !(out.active_joint_mask & bit)) continue;
+            if (now - s_arm_joint_heard_ms[j] > (uint32_t)ARM_JOINT_STALE_MS)
+                presence &= (uint16_t)~bit;
+        }
+    }
+#endif
+    out.init_presence_mask = presence;
 }
 
 bool CANInterface::isOk() { return s_ok; }
@@ -933,6 +962,10 @@ void CANInterface::poll() {
         s_arm_req_disarm = false;
         s_arm_estop_hold = false;   // explicit disarm overrides an e-stop hold
         disableArmMotors();
+        // Clear the presence snapshot so a disarmed arm doesn't keep reporting the
+        // last session's joints as present (the GUI dots go blank until re-arm).
+        s_arm_presence_mask = 0;
+        for (uint8_t j = 0; j < 6; j++) s_arm_joint_heard_ms[j] = 0;
         if (s_arm_state != ArmState::FAULT) s_arm_state = ArmState::UNINIT;
     }
     if (s_arm_req_arm) {

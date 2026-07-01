@@ -17,6 +17,7 @@ class DashboardPanel;
 class OdometryPanel;
 class DigitalTwinPanel;
 class GstAvStream;
+class GstMicSender;
 class SettingsDialog;
 class SystemsWindow;
 class QWidget;
@@ -45,6 +46,7 @@ private:
     QWidget* wrapScroll(QWidget* w);  // scrollable container for a tall panel
 #ifdef HAVE_GSTREAMER
     void setupAvStreams();   // create + register the C920 A/V SRT receivers
+    void setupMicSender();   // (re)create the operator→robot talkback SRT sender
 #endif
 
     rclcpp::Node::SharedPtr node_;
@@ -61,6 +63,8 @@ private:
     rclcpp::Publisher<std_msgs::msg::UInt16MultiArray>::SharedPtr ppm_calib_pub_;
 #ifdef HAVE_GSTREAMER
     std::vector<std::shared_ptr<GstAvStream>> av_streams_;
+    std::shared_ptr<GstMicSender> mic_sender_;   // operator mic → robot speaker
+    bool talkback_on_{false};                    // desired talkback state (toggle)
 #endif
 
     std::thread ros_thread_;

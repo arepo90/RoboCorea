@@ -63,6 +63,7 @@ set(GUI_SOURCES
   src/video_widget.cpp
   src/video_panel.cpp
   src/dashboard_panel.cpp
+  src/mag_plot.cpp
   src/odometry_panel.cpp
   src/speech_processor.cpp
   src/urdf_viewer.cpp
@@ -95,7 +96,7 @@ set(GUI_SOURCES
   include/gui/routine_programmer.hpp
 )
 if(GST_FOUND)
-  list(APPEND GUI_SOURCES src/gst_av_stream.cpp)
+  list(APPEND GUI_SOURCES src/gst_av_stream.cpp src/gst_mic_sender.cpp)
 endif()
 
 add_executable(gui ${GUI_SOURCES})
@@ -155,7 +156,9 @@ ament_target_dependencies(gui
 install(TARGETS gui
   DESTINATION lib/${PROJECT_NAME})
 
-install(PROGRAMS scripts/c920_srt_stream.sh
+install(PROGRAMS
+  scripts/c920_srt_stream.sh
+  scripts/jetson_speaker_sink.sh
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch assets

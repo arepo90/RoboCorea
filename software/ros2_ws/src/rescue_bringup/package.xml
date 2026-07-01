@@ -16,6 +16,9 @@
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>rescue_interfaces</exec_depend>
+  <!-- camera_streamer: ZED left-image tap re-encoded to SRT -->
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

@@ -1,4 +1,5 @@
 #include "gui/dashboard_panel.hpp"
+#include "gui/mag_plot.hpp"
 #include "gui/speech_processor.hpp"
 #include "gui/app_settings.hpp"
 
@@ -9,6 +10,7 @@
 #include <QIcon>
 #include <QMessageBox>
 #include <QSignalBlocker>
+#include <QTabWidget>
 #include <QTextEdit>
 #include <QVBoxLayout>
 
@@ -114,13 +116,36 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         mag_hdr_row->addWidget(mag_toggle_);
         layout->addLayout(mag_hdr_row);
     }
+    // Two views in subtabs: "Values" is the numeric per-axis readout; "Graph" is
+    // a live strip chart (X/Y/Z on one graph) so peaks/dips are visible in real
+    // time. "Clear Data" resets both. Kept compact so the dashboard still fits.
     mag_x_ = make_val(); mag_y_ = make_val(); mag_z_ = make_val();
+
+    auto* mag_values = new QWidget(this);
+    auto* mag_values_l = new QVBoxLayout(mag_values);
+    mag_values_l->setContentsMargins(2, 4, 2, 2);
+    mag_values_l->setSpacing(2);
     for (auto [lbl, val] : {std::pair{"X", mag_x_}, {"Y", mag_y_}, {"Z", mag_z_}}) {
         auto* row = new QHBoxLayout();
         row->addWidget(make_axis(lbl));
         row->addWidget(val, 1);
-        layout->addLayout(row);
+        mag_values_l->addLayout(row);
     }
+    mag_values_l->addStretch();
+
+    mag_plot_ = new MagPlot(this);
+
+    mag_tabs_ = new QTabWidget(this);
+    mag_tabs_->setDocumentMode(true);
+    mag_tabs_->setStyleSheet(
+        "QTabWidget::pane { border: 1px solid #333; border-radius: 3px; top: -1px; }"
+        "QTabBar::tab { background: #2a2a3e; color: #999; padding: 3px 12px; "
+        "               border: 1px solid #333; border-bottom: none; "
+        "               border-top-left-radius: 3px; border-top-right-radius: 3px; }"
+        "QTabBar::tab:selected { background: #1a1a2e; color: #4fc3f7; }");
+    mag_tabs_->addTab(mag_values, "Values");
+    mag_tabs_->addTab(mag_plot_, "Graph");
+    layout->addWidget(mag_tabs_);
 
     // ── Thermal acquisition enable ────────────────────────────────────────────
     // The dashboard owns /sensors/enable_mask (bit0 mag, bit1 thermal). The
@@ -195,6 +220,27 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         speech_processor_->setGrammar(AppSettings::instance().vosk_grammar);
     }
     audio_btn_->setChecked(AppSettings::instance().audio_start_enabled.load());
+
+    // ── Talkback (operator mic → robot speaker) ──────────────────────────────
+    // Reverse of the audio monitor above: streams THIS workstation's microphone
+    // to the robot, which plays it on a Jetson speaker (GstMicSender + the
+    // jetson_speaker_sink.sh listener). Off by default; the operator toggles it
+    // on to talk. Speaker hardware on the robot is still TBD, so this only
+    // controls whether we transmit — nothing here assumes a specific device.
+    {
+        auto* talk_row = new QHBoxLayout();
+        talk_row->setSpacing(4);
+        auto* talk_label = new QLabel("Talkback (mic → robot)", this);
+        talk_label->setStyleSheet(lbl_style);
+        talk_btn_ = make_sensor_toggle();
+        talk_btn_->setToolTip("Transmit this workstation's microphone to the robot's "
+                              "speaker over SRT (operator → robot talkback).");
+        connect(talk_btn_, &QPushButton::toggled, this, &DashboardPanel::onTalkbackToggled);
+        talk_row->addWidget(talk_label, 1);
+        talk_row->addWidget(talk_btn_);
+        layout->addLayout(talk_row);
+    }
+    talk_btn_->setChecked(AppSettings::instance().talkback_start_enabled.load());
 
     // ── Subscriptions (ROS thread → Qt via queued signals) ───────────────────
     connect(this, &DashboardPanel::magnetometerUpdated,
@@ -518,6 +564,10 @@ void DashboardPanel::onTelemetryReceived()
 {
     hb_received_ = true;
     setConnState("#33cc33", "Online");
+    if (!link_online_) {
+        link_online_ = true;
+        updateArmCanDots();   // link back up — presence dots meaningful again
+    }
     if (pulse_anim_) {
         pulse_anim_->stop();
         pulse_anim_->start();
@@ -567,6 +617,10 @@ void DashboardPanel::onHeartbeatCheck()
         uptime_label_->setText("--");
         battery_label_->setText("--");
         battery_label_->setStyleSheet("color: #4fc3f7; font-size: 12px;");
+        if (link_online_) {
+            link_online_ = false;
+            updateArmCanDots();   // link lost — don't trust the presence dots
+        }
     }
 }
 
@@ -637,6 +691,13 @@ void DashboardPanel::onAudioToggled(bool checked)
     emit audioMonitorToggled(checked);
 }
 
+void DashboardPanel::onTalkbackToggled(bool checked)
+{
+    if (talk_btn_) talk_btn_->setText(checked ? "ON" : "OFF");
+    // MainWindow owns the GstMicSender and starts/stops it on this signal.
+    emit talkbackToggled(checked);
+}
+
 void DashboardPanel::onTranscriptionUpdated(const QString& text)
 {
     transcription_->setPlainText(text);
@@ -648,6 +709,7 @@ void DashboardPanel::onMagnetometerUpdated(double x, double y, double z)
     mag_x_->setText(QString::number(x, 'f', 2));
     mag_y_->setText(QString::number(y, 'f', 2));
     mag_z_->setText(QString::number(z, 'f', 2));
+    if (mag_plot_) mag_plot_->addSample(x, y, z);
 }
 
 void DashboardPanel::onImuUpdated(double yaw, double pitch, double roll)
@@ -661,6 +723,8 @@ void DashboardPanel::onClearAll()
 {
     for (QLabel* l : {mag_x_, mag_y_, mag_z_, imu_yaw_, imu_pitch_, imu_roll_})
         l->setText("--");
+    if (mag_plot_)
+        mag_plot_->clear();
     if (speech_processor_)
         speech_processor_->clearTranscription();
 }
@@ -679,9 +743,12 @@ void DashboardPanel::applySpeechAudioSettings()
         std::lock_guard<std::mutex> lk(S.strings_mutex);
         speech_processor_->setGrammar(S.vosk_grammar);
     }
-    // setChecked emits toggled() (→ audioMonitorToggled) only on a real change.
+    // setChecked emits toggled() (→ audioMonitorToggled / talkbackToggled) only
+    // on a real change.
     if (audio_btn_)
         audio_btn_->setChecked(S.audio_start_enabled.load());
+    if (talk_btn_)
+        talk_btn_->setChecked(S.talkback_start_enabled.load());
 }
 
 // ── Arm lifecycle ─────────────────────────────────────────────────────────────
@@ -728,6 +795,8 @@ void DashboardPanel::onArmStateUpdated(const QString& state)
     arm_disarm_btn_->setEnabled(ready || state == "INITIALIZING");
     arm_mode_btn_->setEnabled(ready);                      // mode only meaningful when ready
 
+    updateArmCanDots();   // state gates whether the presence dots are meaningful
+
     // One-shot startup prompt: the arm boots passive by design, so offer to arm
     // it the first time we learn it's connected but disarmed.
     if (!auto_arm_prompted_) {
@@ -753,12 +822,27 @@ void DashboardPanel::onArmModeUpdated(const QString& mode)
 
 void DashboardPanel::onArmPresenceUpdated(int mask)
 {
-    // Bits 0..5 = J1..J6 (ODrive J1-3, ZE300 J4, LKTech J5-6). Set when each
-    // joint's zero is captured at arm time; 0 before arming.
+    // Bits 0..5 = J1..J6 (ODrive J1-3, ZE300 J4, LKTech J5-6). The firmware now
+    // reports this LIVE: a joint captured at arm time but gone silent on the bus is
+    // cleared, so this reflects the current state, not a frozen arm-time snapshot.
+    arm_presence_mask_ = mask;
+    updateArmCanDots();
+}
+
+void DashboardPanel::updateArmCanDots()
+{
+    // The dots are only meaningful when the robot link is live AND the arm is up.
+    // Otherwise a stale latched presence (e.g. from a previous session) or a
+    // dropped link could show misleading green — so gray them out ("unknown").
+    const bool armed = (arm_state_ == "READY" || arm_state_ == "INITIALIZING");
+    const bool live = link_online_ && armed;
     for (int j = 0; j < 6; ++j) {
-        const bool present = (mask >> j) & 0x1;
+        const char* color;
+        if (!live)
+            color = "#666";   // unknown — link down or arm disarmed/offline
+        else
+            color = ((arm_presence_mask_ >> j) & 0x1) ? "#33cc33" : "#cc3333";
         arm_can_dots_[j]->setStyleSheet(
-            QString("color: %1; font-size: 10px; font-weight: bold;")
-                .arg(present ? "#33cc33" : "#cc3333"));
+            QString("color: %1; font-size: 10px; font-weight: bold;").arg(color));
     }
 }

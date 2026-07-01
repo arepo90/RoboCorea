@@ -94,13 +94,40 @@ SettingsDialog::SettingsDialog(rclcpp::Node::SharedPtr node, QWidget* parent)
     auto* audio_group = new QGroupBox("Audio", this);
     auto* af = new QVBoxLayout(audio_group);
     af->setContentsMargins(6, 4, 6, 6);
-    audio_check_ = new QCheckBox("Enable audio playback", audio_group);
-    audio_check_->setStyleSheet(
+    af->setSpacing(6);
+    const QString check_style =
         "QCheckBox { color: #ccc; font-size: 12px; spacing: 8px; }"
         "QCheckBox::indicator { width: 16px; height: 16px; }"
         "QCheckBox::indicator:unchecked { border: 1px solid #555; border-radius: 2px; background: #1e1e2e; }"
-        "QCheckBox::indicator:checked   { border: 1px solid #4aba4a; border-radius: 2px; background: #2a8a2a; }");
+        "QCheckBox::indicator:checked   { border: 1px solid #4aba4a; border-radius: 2px; background: #2a8a2a; }";
+
+    audio_check_ = new QCheckBox("Enable audio playback (robot mic → speaker)", audio_group);
+    audio_check_->setStyleSheet(check_style);
     af->addWidget(audio_check_);
+
+    // Talkback: operator mic → robot speaker (the reverse audio path).
+    talkback_check_ = new QCheckBox("Enable talkback (mic → robot speaker)", audio_group);
+    talkback_check_->setStyleSheet(check_style);
+    talkback_check_->setToolTip(
+        "Start transmitting this workstation's microphone to the robot on launch. "
+        "The robot plays it on a Jetson speaker (see jetson_speaker_sink.sh).");
+    af->addWidget(talkback_check_);
+
+    auto* mic_row = new QHBoxLayout();
+    auto* mic_lbl = new QLabel("Mic device:", audio_group);
+    mic_device_edit_ = new QLineEdit(audio_group);
+    mic_device_edit_->setPlaceholderText("default input (leave blank)");
+    mic_device_edit_->setToolTip(
+        "ALSA capture device for talkback, e.g. hw:CARD=C920. Blank = system default.");
+    QTimer::singleShot(0, mic_device_edit_, [this]() {
+        auto pal = mic_device_edit_->palette();
+        pal.setColor(QPalette::PlaceholderText, QColor("#7070a0"));
+        mic_device_edit_->setPalette(pal);
+    });
+    mic_row->addWidget(mic_lbl);
+    mic_row->addWidget(mic_device_edit_, 1);
+    af->addLayout(mic_row);
+
     root->addWidget(audio_group);
 
     // ── Speech ─────────────────────────────────────────────────────────────────
@@ -193,23 +220,27 @@ void SettingsDialog::reloadFromSettings()
 
     auto& S = AppSettings::instance();
     audio_check_->setChecked(S.audio_start_enabled.load());
+    talkback_check_->setChecked(S.talkback_start_enabled.load());
     colormap_combo_->setCurrentIndex(indexOfColormap(S.thermal_colormap.load()));
     interp_combo_->setCurrentIndex(indexOfInterp(S.thermal_interp.load()));
     upscale_combo_->setCurrentIndex(indexOfUpscale(S.thermal_upscale_w.load()));
     font_scale_slider_->setValue(S.label_font_scale_x100.load());
 
-    std::string grammar;
+    std::string grammar, mic;
     {
         std::lock_guard<std::mutex> lk(S.strings_mutex);
         grammar = S.vosk_grammar;
+        mic     = S.mic_device;
     }
     grammar_edit_->setText(QString::fromStdString(grammar));
+    mic_device_edit_->setText(QString::fromStdString(mic));
 }
 
 void SettingsDialog::captureOriginals()
 {
     auto& S = AppSettings::instance();
-    orig_audio_enabled_   = S.audio_start_enabled.load();
+    orig_audio_enabled_    = S.audio_start_enabled.load();
+    orig_talkback_enabled_ = S.talkback_start_enabled.load();
     orig_colormap_        = S.thermal_colormap.load();
     orig_interp_          = S.thermal_interp.load();
     orig_upscale_w_       = S.thermal_upscale_w.load();
@@ -217,14 +248,16 @@ void SettingsDialog::captureOriginals()
     orig_font_scale_x100_ = S.label_font_scale_x100.load();
     {
         std::lock_guard<std::mutex> lk(S.strings_mutex);
-        orig_grammar_ = S.vosk_grammar;
+        orig_grammar_    = S.vosk_grammar;
+        orig_mic_device_ = S.mic_device;
     }
 }
 
 void SettingsDialog::restoreOriginals()
 {
     auto& S = AppSettings::instance();
-    S.audio_start_enabled .store(orig_audio_enabled_);
+    S.audio_start_enabled    .store(orig_audio_enabled_);
+    S.talkback_start_enabled .store(orig_talkback_enabled_);
     S.thermal_colormap    .store(orig_colormap_);
     S.thermal_interp      .store(orig_interp_);
     S.thermal_upscale_w   .store(orig_upscale_w_);
@@ -233,6 +266,7 @@ void SettingsDialog::restoreOriginals()
     {
         std::lock_guard<std::mutex> lk(S.strings_mutex);
         S.vosk_grammar = orig_grammar_;
+        S.mic_device   = orig_mic_device_;
     }
 }
 
@@ -243,7 +277,8 @@ void SettingsDialog::applyToSettings()
     int ii = interp_combo_->currentIndex();
     int ui = upscale_combo_->currentIndex();
 
-    S.audio_start_enabled .store(audio_check_->isChecked());
+    S.audio_start_enabled    .store(audio_check_->isChecked());
+    S.talkback_start_enabled .store(talkback_check_->isChecked());
     S.thermal_colormap    .store(COLORMAPS[ci]);
     S.thermal_interp      .store(INTERPS[ii]);
     S.thermal_upscale_w   .store(UPSCALE_W[ui]);
@@ -253,6 +288,7 @@ void SettingsDialog::applyToSettings()
     {
         std::lock_guard<std::mutex> lk(S.strings_mutex);
         S.vosk_grammar = grammar_edit_->text().trimmed().toStdString();
+        S.mic_device   = mic_device_edit_->text().trimmed().toStdString();
     }
 }
 

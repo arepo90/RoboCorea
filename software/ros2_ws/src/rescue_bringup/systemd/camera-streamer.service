@@ -1,0 +1,26 @@
+[Unit]
+Description=RoboCorea camera streamer (auto-detect USB cams + ZED tap -> SRT to GUI)
+# Replaces the old c920-stream.service: a ROS 2 node that auto-detects every USB
+# UVC camera, streams each to the GUI over SRT (H.264/MPEG-TS, video-only),
+# gives the primary C920 its mic as Opus (the A/V stream), taps the ZED SDK's
+# published left image into its own SRT stream, and advertises the live list on
+# /robot/camera_streams so the GUI auto-populates + handles hot-plug. The video
+# rides SRT (not DDS/Zenoh); only the ZED tap + catalog are ROS.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Must match the workstation/GUI domain (and the other robot nodes).
+Environment=ROS_DOMAIN_ID=20
+# Source ROS + the workspace, then run the node. %h is $HOME; edit if different.
+# Tunables are ROS params (see camera_streamer.py): primary_match, *_port,
+# primary_audio_device, bitrate, zed_topic, zed_enable, …
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 run rescue_bringup camera_streamer'
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

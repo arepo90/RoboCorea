@@ -12,6 +12,7 @@
 #ifdef HAVE_GSTREAMER
 #include "gui/speech_processor.hpp"
 #include "gui/gst_av_stream.hpp"
+#include "gui/gst_mic_sender.hpp"
 #endif
 
 #include <QCloseEvent>
@@ -89,11 +90,23 @@ MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget* parent)
     ppm_calib_pub_ = node_->create_publisher<std_msgs::msg::UInt16MultiArray>(
         "/robot/ppm_calib", cfg_qos);
 #ifdef HAVE_GSTREAMER
-    // Audio-monitor toggle mutes/unmutes the speaker side of every A/V stream.
+    // Audio-monitor toggle mutes/unmutes the speaker side of every A/V stream
+    // (robot mic → this workstation's speaker).
     connect(dashboard_panel_, &DashboardPanel::audioMonitorToggled, this,
             [this](bool en) {
                 for (auto& s : av_streams_) s->setPlaybackEnabled(en);
             });
+    // Talkback toggle starts/stops streaming this workstation's mic to the robot
+    // (operator mic → robot speaker). The mic is only opened while ON.
+    connect(dashboard_panel_, &DashboardPanel::talkbackToggled, this,
+            [this](bool en) {
+                talkback_on_ = en;
+                if (!mic_sender_) return;
+                if (en) mic_sender_->start();
+                else    mic_sender_->stop();
+            });
+    talkback_on_ = AppSettings::instance().talkback_start_enabled.load();
+    setupMicSender();
 #endif
 
     startRosSpinThread();
@@ -112,6 +125,8 @@ MainWindow::~MainWindow()
     // Stop A/V receivers before the dashboard/speech processor (QObject children)
     // are torn down, so no audio callback fires into a dead SpeechProcessor.
     av_streams_.clear();
+    // Stop the talkback sender too (closes the mic + SRT connection).
+    if (mic_sender_) { mic_sender_->stop(); mic_sender_.reset(); }
 #endif
     // Top-level, parentless window — delete explicitly (after the ROS spin thread
     // has stopped, so no callback fires into its destroyed subscriptions).
@@ -166,6 +181,34 @@ void MainWindow::setupAvStreams()
 
         av_streams_.push_back(std::move(av));
     }
+}
+
+void MainWindow::setupMicSender()
+{
+    // (Re)create the operator→robot talkback sender from settings. Called at
+    // startup and after the settings dialog applies (so host/mic/port edits take
+    // effect). The mic is only opened when talkback is ON (talkback_on_).
+    auto& S = AppSettings::instance();
+    std::string host, mic;
+    int port, latency;
+    {
+        std::lock_guard<std::mutex> lk(S.video_mutex);
+        host    = S.talkback_host.empty() ? S.default_robot_host : S.talkback_host;
+        port    = S.talkback_port;
+        latency = S.talkback_latency_ms;
+    }
+    {
+        std::lock_guard<std::mutex> lk(S.strings_mutex);
+        mic = S.mic_device;
+    }
+    const int kbps = S.talkback_opus_kbps.load();
+
+    if (mic_sender_) { mic_sender_->stop(); mic_sender_.reset(); }
+    if (host.empty()) return;   // no robot host configured yet
+
+    mic_sender_ = std::make_shared<GstMicSender>(host, port, latency, mic, kbps);
+    if (talkback_on_)
+        mic_sender_->start();
 }
 #endif  // HAVE_GSTREAMER
 
@@ -231,7 +274,12 @@ void MainWindow::onSettingsApplied()
 {
     // Push speech/audio prefs into the live dashboard, then republish the PPM
     // calibration so the robot picks up calibration edits immediately.
+    // applySpeechAudioSettings() drives the talkback toggle from settings, which
+    // updates talkback_on_ via talkbackToggled before we rebuild the sender.
     dashboard_panel_->applySpeechAudioSettings();
+#ifdef HAVE_GSTREAMER
+    setupMicSender();   // pick up talkback host/mic/port/kbps edits
+#endif
     publishPpmCalib();
 }
 

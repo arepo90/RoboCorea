@@ -38,9 +38,12 @@ struct AppSettings {
 
     std::mutex               video_mutex;
     std::string              default_robot_host{"192.168.1.10"};  // TODO: set to your Jetson IP
+    // Only the A/V primary is static (it carries Opus audio → GstAvStream + Vosk).
+    // All other cameras are auto-detected on the robot by the camera_streamer node
+    // and advertised on /robot/camera_streams, so the GUI discovers them live —
+    // no static entry needed (see SourceManager::onCameraStreamsReceived).
     std::vector<VideoStream> video_streams{
         {"C920 Front (SRT A/V)", "", 8890, 120, true},   // video + C920 mic (Opus)
-        {"C920 Rear (SRT)",      "", 8891, 120, false},  // video only
     };
     // Snapshot copy for worker/UI threads (avoids holding the mutex while building UI).
     std::vector<VideoStream> videoStreams();
@@ -66,6 +69,25 @@ struct AppSettings {
     // Comma-separated Vosk vocabulary; empty = unrestricted recognition.
     std::mutex   strings_mutex;
     std::string  vosk_grammar;
+    // Talkback capture device: ALSA device string for the operator mic (e.g.
+    // "hw:CARD=..."); empty = system default input (autoaudiosrc). Guarded by
+    // strings_mutex.
+    std::string  mic_device;
+
+    // ── Operator → robot talkback (mic → robot speaker) ──────────────────────
+    // The reverse of the C920 A/V audio: the workstation mic is Opus-encoded and
+    // pushed over SRT to the robot, which plays it on a Jetson-attached speaker
+    // (Bluetooth or USB — hardware TBD; see scripts/jetson_speaker_sink.sh). The
+    // robot runs the SRT listener; the GUI (GstMicSender) is the caller.
+    // Host/port/latency are network config guarded by video_mutex (like the
+    // video streams); the two below are independent atomics.
+    std::string      talkback_host;             // empty => default_robot_host
+    int              talkback_port{8892};       // must match jetson_speaker_sink.sh
+    int              talkback_latency_ms{120};
+    std::atomic<int> talkback_opus_kbps{24};    // 24 kbps mono = clean voice
+    // Startup state of the talkback toggle. Off by default — the operator turns
+    // it on to talk (keeps the mic closed / avoids echo otherwise).
+    std::atomic<bool> talkback_start_enabled{false};
 
     // (The per-channel keybind table was removed — the RC uses a fixed control
     // scheme hardcoded in the firmware. Only PPM calibration is configurable.)

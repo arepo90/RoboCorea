@@ -120,7 +120,9 @@ This brings up, as managed services that survive an SSH drop / reboot:
   wheel odom). The core link.
 - **robot-manager** + **map-manager** — the services the GUI's Robot Systems
   window calls (start/stop perception stacks; save/load named maps).
-- **c920-stream** — the C920 video over SRT to the GUI.
+- **camera-streamer** — auto-detects every USB camera + taps the ZED, streams
+  them to the GUI over SRT, and advertises them on `/robot/camera_streams` so the
+  GUI populates its source list automatically (hot-plug aware).
 
 It leaves **ZED + Lidar + SLAM/Localization/Nav** *off* — you start those from the
 GUI when you want them (or pass `--sensors` to start sensors + SLAM immediately).
@@ -336,10 +338,16 @@ the marked files **if the real values differ**:
      or just pass `./jetson.sh --serial <dev>`.
    - Install the **RPLidar udev rule** ([§0.3](#03-stable-serial-device-names-jetson--strongly-recommended)) so `/dev/rplidar` exists — `lidar.service` opens that exact path.
 
-3. **Camera devices** (`v4l2-ctl --list-devices`): the C920 streamer is hardcoded
-   to `/dev/video2` (port 8890). If the C920 enumerates elsewhere, edit the
-   `CAMERAS=(...)` array at the top of
-   [`software/ros2_ws/src/gui/scripts/c920_srt_stream.sh`](software/ros2_ws/src/gui/scripts/c920_srt_stream.sh).
+3. **Camera devices** (`v4l2-ctl --list-devices`): `camera-streamer.service`
+   auto-detects every USB UVC camera and streams each over SRT (video-only),
+   giving the one whose name matches `primary_match` (default `C920`) its mic as
+   the A/V stream on port 8890; extra cams get ports from 8900 up and are
+   advertised on `/robot/camera_streams`. The ZED is excluded from the USB scan
+   and instead tapped from its ROS image topic. Tunables are ROS params in
+   [`camera_streamer.py`](software/ros2_ws/src/rescue_bringup/rescue_bringup/camera_streamer.py)
+   (override in `camera-streamer.service`). For a quick zero-ROS single-camera
+   test, the old [`c920_srt_stream.sh`](software/ros2_ws/src/gui/scripts/c920_srt_stream.sh)
+   remains as a manual fallback (stop the service first).
 
 4. **ZED model:** `zed.service` launches `camera_model:=zed2`. If it's a ZED (1)
    or ZED Mini, edit that in
@@ -556,11 +564,15 @@ robot. Watch the global/local plans in RViz/the map window; re-send the goal.
 
 ### H. Video (C920 / RF cams)
 
-**No C920 video in the GUI.** `journalctl --user -u c920-stream.service -e`. The
-streamer is pinned to `/dev/video2` port `8890` — confirm the camera enumerates
-there (`v4l2-ctl --list-devices`) and the GUI's SRT settings point at the Jetson IP
-+ that port. SRT is separate from ROS, so the link being healthy for ROS doesn't
-guarantee the video port is reachable (check a firewall).
+**No C920 / USB-cam video in the GUI.** `journalctl --user -u camera-streamer.service -e`.
+The node auto-detects cameras and logs each one it streams (`streaming … -> srt://:PORT`)
+plus the advertised catalog; extra cams appear in the GUI source dropdown by name
+once `/robot/camera_streams` is received (`ros2 topic echo /robot/camera_streams`).
+The primary A/V C920 is the static "C920 Front (SRT A/V)" source on port `8890` —
+confirm a camera whose name matches `primary_match` (default `C920`) enumerates
+(`v4l2-ctl --list-devices`) and the GUI's `default_robot_host` points at the Jetson
+IP. SRT is separate from ROS, so a healthy ROS link doesn't guarantee the video
+ports are reachable (check a firewall; extras use 8900+, the ZED tap 8899).
 
 **No RF driving-cam video.** Those are local USB digitizers on the **laptop**
 (`/dev/videoN`), nothing to do with the robot/ROS — check the digitizer + the GUI

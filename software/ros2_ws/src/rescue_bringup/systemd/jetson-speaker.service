@@ -1,0 +1,28 @@
+[Unit]
+Description=RoboCorea Jetson talkback speaker (workstation GUI mic -> Jetson speaker)
+# Robot end of the operator->robot talkback: an SRT listener that receives the
+# operator's microphone (Opus/MPEG-TS, the reverse of c920-stream.service) and
+# plays it on a Jetson speaker. NOT a ROS node and NOT on DDS/Zenoh — a plain
+# GStreamer pipeline. Choose the output device at the top of
+# gui/scripts/jetson_speaker_sink.sh (default = system default sink).
+#
+# Run this as a `systemd --user` service (like the other units, deployed to
+# ~/.config/systemd/user/) so it shares the user session's audio server
+# (PipeWire/PulseAudio) — required for a Bluetooth sink, and simplest for USB.
+# Bluetooth: pair + `trust` the speaker once with bluetoothctl and it reconnects
+# in range; make it the default sink (or pin it in the script).
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+# Standalone bash script (no build step). %h is $HOME; adjust if your checkout
+# differs. Runs the pipeline in the foreground; systemd tears the cgroup down.
+ExecStart=/bin/bash %h/RoboCorea/software/ros2_ws/src/gui/scripts/jetson_speaker_sink.sh
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

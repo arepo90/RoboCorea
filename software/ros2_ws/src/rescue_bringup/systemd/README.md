@@ -28,7 +28,8 @@ target and reports the state — so the GUI gets one-click control with no orpha
 | `rescue-sensors.target` | Group: start/stop/restart it to control **both** drivers. |
 | *(removed)* `jetson-sensors.service` | The MLX90640 thermal camera + LIS3MDL magnetometer moved to the **arm PCB** (read by the arm ESP32, relayed by `esp32_bridge`), so there is no Jetson I2C sensor service. Enable/disable is the GUI's `/sensors/enable_mask` (→ `MSG_SENSOR_ENABLE`), not a systemd stack. |
 | `esp32-bridge.service` | **Always-on** serial⇄ROS 2 relay (drive/flippers/arm, thermal+mag from the arm PCB, wheel odom). Not PartOf any target. Pin a serial device via `ROBOCOREA_SERIAL_PORT` (or `jetson.sh --serial`), else it scans `ttyCH341USB*` + `serial/by-id`. |
-| `c920-stream.service` | **Always-on** C920 video over SRT to the GUI (a GStreamer pipeline, not a ROS node). Edit cameras/ports/bitrate at the top of `gui/scripts/c920_srt_stream.sh`. |
+| `camera-streamer.service` | **Always-on** multi-camera SRT streamer (a ROS node, `rescue_bringup camera_streamer`). Auto-detects every USB UVC camera, streams each to the GUI over SRT (video-only), gives the primary C920 its mic as Opus (the A/V stream), taps the ZED SDK's published left image into its own SRT stream, and advertises the live list on `/robot/camera_streams` so the GUI auto-populates + handles hot-plug. Tunables are ROS params in `camera_streamer.py` (primary_match, *_port, bitrate, zed_topic, zed_enable, …). Replaces the old `c920-stream.service` / `c920_srt_stream.sh` (kept as a manual fallback). |
+| `jetson-speaker.service` | **Always-on** talkback receiver: an SRT listener that plays the operator's mic (from the GUI, reverse of `c920-stream`) on a Jetson speaker. Plain GStreamer, not a ROS node. Pick the output device at the top of `gui/scripts/jetson_speaker_sink.sh` (default = system default sink; USB or a paired+trusted Bluetooth speaker). Runs as a `--user` service to share the session audio server. |
 | `rescue-mapping.service` | SLAM + odometry (`real_mapping.launch.py`, `use_rviz:=false`) — runs on the robot; the workstation only views `/map` over the network. **Uses the same `sensor_frontend` front-end as `rescue-localization.service`, so mapping and localization share one canonical TF tree** (`map→odom→base_footprint→base_link→base_laser`). On-demand; needs the sensor stack up. Odometry source switchable (EKF vs ZED-direct) via `ROBOCOREA_USE_EKF` — see [Odometry mode](#odometry-mode-prod-vs-bench). |
 | `rescue-mapping3d.service` | 3-D OctoMap (`rescue_mapping3d`) — builds an octree from the ZED cloud + TF on the robot; publishes only the compressed binary octree on `/robot/map3d` (latched, ~1 Hz). The raw cloud never leaves the Jetson. On-demand; needs sensors + mapping up. Also serves `/robot/map3d/{save,load}` (named `.bt` under `~/maps/<name>/`). |
 | `rescue-localization.service` | 2-D localization on a **saved** map — **localization only** (AMCL + map_server + EKF, **no Nav2**) via `rescue_nav real_navigation.launch.py nav:=false`. On-demand; (re)started by `map_manager` on a GUI map-load, reading the active map from `~/.config/rescue/active_map.env` (`MAP_DIR=~/maps/<name>`). Needs sensors up. Set the start pose from the GUI (click-drag → `/initialpose`). |
@@ -81,7 +82,8 @@ systemctl --user daemon-reload
 
 # always-on services (the GUI reaches the managers; the bridge is the core link)
 systemctl --user enable --now robot-manager.service map-manager.service \
-                              esp32-bridge.service c920-stream.service
+                              esp32-bridge.service camera-streamer.service \
+                              jetson-speaker.service
 systemctl --user enable zed.service lidar.service rescue-sensors.target
 # rescue-mapping / rescue-localization / rescue-navigation are on-demand (no
 # enable): the GUI starts mapping; map_manager starts localization on a map-load;

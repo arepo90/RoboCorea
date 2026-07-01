@@ -11,7 +11,8 @@
 #                               thermal+mag, wheel odom). The core link.
 #     • robot-manager.service — /robot/<stack>/{start,stop,status} for the GUI
 #     • map-manager.service   — /robot/maps/{save,list,load,delete} for the GUI
-#     • c920-stream.service   — C920 video over SRT to the GUI (skip: --no-camera)
+#     • camera-streamer.service — auto-detect USB cams + ZED tap over SRT to the
+#                               GUI, advertises them on ROS (skip: --no-camera)
 #
 #   ON-DEMAND (left for the operator to start from the GUI "Robot Systems"
 #   window — Sensors → Mapping/Localization → Navigation), UNLESS you pass
@@ -27,7 +28,7 @@
 #   ./jetson.sh --sensors            # also start ZED+Lidar + SLAM immediately
 #   ./jetson.sh --serial /dev/ttyCH341USB0   # pin the bridge to one serial device
 #   ./jetson.sh --no-ekf             # bench odometry (ZED-only, no EKF fusion)
-#   ./jetson.sh --no-camera          # don't start the C920 SRT streamer
+#   ./jetson.sh --no-camera          # don't start the camera streamer (SRT cams)
 #   ./jetson.sh --no-bridge          # don't start esp32-bridge (managers only)
 #   ./jetson.sh --domain 30          # use ROS_DOMAIN_ID 30 (default 20)
 #   ./jetson.sh --status             # show what's running, change nothing
@@ -47,7 +48,7 @@ JETSON_PKGS=(rescue_interfaces mlx90640_msgs rescue_bringup esp32_bridge \
              dicerox_mapping rescue_nav rescue_mapping3d)
 
 # Services this script owns. ALWAYS = brought up every run (subject to flags).
-ALWAYS_ON=(esp32-bridge.service robot-manager.service map-manager.service c920-stream.service)
+ALWAYS_ON=(esp32-bridge.service robot-manager.service map-manager.service camera-streamer.service)
 ON_DEMAND=(rescue-sensors.target rescue-mapping.service)   # only with --sensors
 
 log()  { printf '\033[1;32m[jetson]\033[0m %s\n' "$*"; }
@@ -164,7 +165,7 @@ fi
 # ── 5) start the always-on services ───────────────────────────────────────────
 start_set=(robot-manager.service map-manager.service)
 [ "$NO_BRIDGE" = 0 ] && start_set+=(esp32-bridge.service)
-[ "$NO_CAMERA" = 0 ] && start_set+=(c920-stream.service)
+[ "$NO_CAMERA" = 0 ] && start_set+=(camera-streamer.service)
 
 log "enabling + (re)starting: ${start_set[*]}"
 systemctl --user enable "${start_set[@]}" >/dev/null
