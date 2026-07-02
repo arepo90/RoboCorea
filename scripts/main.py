@@ -22,7 +22,7 @@ class ESP32SensorBridge(Node):
     def __init__(self):
         super().__init__('esp32_sensor_bridge')
 
-        self.declare_parameter('port', '/dev/ttyUSB0')
+        self.declare_parameter('port', '/dev/ttyACM0')
         self.declare_parameter('baudrate', 921600)
         
         port = self.get_parameter('port').value
