@@ -323,6 +323,25 @@ void VideoWidget::updateSources(const QStringList& names,
         onSourceChanged(0);
 }
 
+void VideoWidget::deselectThermal()
+{
+    if (source_combo_->currentData().toString().startsWith("thermal:"))
+        source_combo_->setCurrentIndex(0);   // "None" — runs onSourceChanged
+}
+
+bool VideoWidget::selectThermalIfIdle()
+{
+    if (!source_combo_->currentData().toString().isEmpty())
+        return false;   // cell already shows something else
+    for (int i = 0; i < source_combo_->count(); ++i) {
+        if (source_combo_->itemData(i).toString().startsWith("thermal:")) {
+            source_combo_->setCurrentIndex(i);   // runs onSourceChanged
+            return true;
+        }
+    }
+    return false;   // no thermal source discovered yet
+}
+
 void VideoWidget::updateFilters(const QStringList& names)
 {
     QString current = filter_combo_->currentText();

@@ -2,11 +2,15 @@
 //
 // RoboCorea — ESP32 firmware configuration
 // =========================================
-// Two identical PCBs run this same firmware. The only intended per-board
+// Three ESP32 boards run this same firmware. The only intended per-board
 // difference is ROBOCOREA_BOARD_ROLE below:
 //   • CHASSIS owns RC/PPM, traction VESCs, flipper VESCs, wheel-odom VESC
-//     telemetry.
+//     telemetry.  (custom PCB)
 //   • ARM owns the mixed-CAN arm bus: ODrive J1–J3, ZE300 J4, LKTech J5–J6.
+//     (custom PCB)
+//   • SENSOR owns the passive victim-detection I2C sensors: MLX90640 thermal
+//     camera + GY-271/HW-246 (QMC5883L) magnetometer. It is a bare DOIT DevKit
+//     V1 — no CAN transceiver, no RC, no gripper; just I2C + the UART link.
 //
 // Pin numbers below were inherited from the legacy Dicerox bring-up and MUST be
 // reconciled against the actual RoboCorea PCB before flashing.
@@ -14,55 +18,62 @@
 // See reference/architecture.md for the full system picture.
 
 // ─── Board role / identity ───────────────────────────────────────────────────
-// Leave the committed default as CHASSIS. For the arm PCB, change only this macro
-// to ROBOCOREA_BOARD_ROLE_ARM before building/flashing.
+// Leave the committed default as CHASSIS. For the arm PCB or the sensor DevKit,
+// change only this macro to the matching role before building/flashing.
 #define ROBOCOREA_BOARD_ROLE_CHASSIS  1
 #define ROBOCOREA_BOARD_ROLE_ARM      2
+#define ROBOCOREA_BOARD_ROLE_SENSOR   3
 #ifndef ROBOCOREA_BOARD_ROLE
-  #define ROBOCOREA_BOARD_ROLE ROBOCOREA_BOARD_ROLE_ARM
+  #define ROBOCOREA_BOARD_ROLE ROBOCOREA_BOARD_ROLE_SENSOR
 #endif
 
 #if ROBOCOREA_BOARD_ROLE == ROBOCOREA_BOARD_ROLE_CHASSIS
   #define ROBOCOREA_ROLE_IS_CHASSIS 1
   #define ROBOCOREA_ROLE_IS_ARM     0
+  #define ROBOCOREA_ROLE_IS_SENSOR  0
 #elif ROBOCOREA_BOARD_ROLE == ROBOCOREA_BOARD_ROLE_ARM
   #define ROBOCOREA_ROLE_IS_CHASSIS 0
   #define ROBOCOREA_ROLE_IS_ARM     1
+  #define ROBOCOREA_ROLE_IS_SENSOR  0
+#elif ROBOCOREA_BOARD_ROLE == ROBOCOREA_BOARD_ROLE_SENSOR
+  #define ROBOCOREA_ROLE_IS_CHASSIS 0
+  #define ROBOCOREA_ROLE_IS_ARM     0
+  #define ROBOCOREA_ROLE_IS_SENSOR  1
 #else
-  #error "ROBOCOREA_BOARD_ROLE must be ROBOCOREA_BOARD_ROLE_CHASSIS or ROBOCOREA_BOARD_ROLE_ARM"
+  #error "ROBOCOREA_BOARD_ROLE must be ROBOCOREA_BOARD_ROLE_CHASSIS, _ARM or _SENSOR"
 #endif
 
 #define ROBOCOREA_PROTOCOL_VERSION       1
 #define BOARD_CAP_CHASSIS_IO       (1 << 0)
 #define BOARD_CAP_ARM_IO           (1 << 1)
 #define BOARD_CAP_RC_PPM           (1 << 2)
-#define BOARD_CAP_MAG              (1 << 3)  // LIS3MDL on the ARM PCB I2C bus
+#define BOARD_CAP_MAG              (1 << 3)  // QMC5883L (GY-271) on the SENSOR ESP32 I2C bus
 #define BOARD_CAP_VESC_BASE        (1 << 4)
 #define BOARD_CAP_ARM_CAN          (1 << 5)
-#define BOARD_CAP_THERMAL          (1 << 6)  // MLX90640 on the ARM PCB I2C bus
+#define BOARD_CAP_THERMAL          (1 << 6)  // MLX90640 on the SENSOR ESP32 I2C bus
 
 #if ROBOCOREA_ROLE_IS_CHASSIS
   #define ROBOCOREA_BOARD_CAPABILITIES \
     (BOARD_CAP_CHASSIS_IO | BOARD_CAP_RC_PPM | BOARD_CAP_VESC_BASE)
+#elif ROBOCOREA_ROLE_IS_ARM
+  #define ROBOCOREA_BOARD_CAPABILITIES \
+    (BOARD_CAP_ARM_IO | BOARD_CAP_ARM_CAN)
 #else
   #define ROBOCOREA_BOARD_CAPABILITIES \
-    (BOARD_CAP_ARM_IO | BOARD_CAP_ARM_CAN | BOARD_CAP_MAG | BOARD_CAP_THERMAL)
+    (BOARD_CAP_MAG | BOARD_CAP_THERMAL)
 #endif
 
-// ─── I2C (ARM PCB: passive victim-detection sensors) ─────────────────────────
-// The MLX90640 thermal camera and the LIS3MDL magnetometer moved OFF the Jetson
-// I2C (GPIO) and onto the ARM PCB's I2C bus — the Jetson's I2C proved unreliable.
-// The arm ESP32 reads them and ships them to the Jetson over the binary UART
-// link (MSG_SENSOR_THERMAL / MSG_SENSOR_MAG); the bridge republishes the same
-// /sensors/thermal + /sensors/mag topics. Only the ARM build starts the sensor
-// tasks (see main.cpp); on the chassis these pins are unused.
-//
-// PRIORITY NOTE: the arm itself is this board's job. The sensor tasks run at a
-// priority BELOW the CAN + control tasks (§FreeRTOS layout) and never touch the
-// CAN bus (sensors are I2C, the arm is CAN/SPI), so they can only consume idle
-// CPU and can never delay the arm CAN relay. Thermal is intentionally slow.
-#define PIN_I2C_SDA          21
-#define PIN_I2C_SCL          22
+// ─── I2C (SENSOR ESP32: passive victim-detection sensors) ────────────────────
+// The MLX90640 thermal camera and the magnetometer live on the dedicated SENSOR
+// ESP32 (a bare DOIT DevKit V1) — they moved off the arm PCB so the arm build no
+// longer carries sensor tasks at all (and off the Jetson I2C before that, which
+// proved unreliable). The sensor ESP32 reads them continuously and ships them to
+// the Jetson over its own binary UART link (MSG_SENSOR_THERMAL/MSG_SENSOR_MAG);
+// the bridge auto-binds the board by MSG_BOARD_IDENTITY and republishes the same
+// /sensors/thermal + /sensors/mag topics. Only the SENSOR build starts the
+// sensor tasks (see main.cpp); on the chassis/arm PCBs these pins are unused.
+#define PIN_I2C_SDA          22
+#define PIN_I2C_SCL          21
 // 400 kHz is the proven legacy speed and is enough for ~4 Hz full thermal frames
 // (a full MLX frame read takes ~250 ms here, which paces thermal to ~4 Hz). Bump
 // toward FM+ (1 MHz) on the bench if you raise THERMAL_REFRESH to 16 Hz.
@@ -463,20 +474,29 @@
 #define ARM_RAMP_MAX_VEL_DPS   { 20.0f, 18.0f, 18.0f, 40.0f, 40.0f, 40.0f }
 #define ARM_RAMP_MAX_ACC_DPS2  { 45.0f, 40.0f, 40.0f, 120.0f, 120.0f, 120.0f }
 
-// ─── Sensors (ARM PCB I2C: MLX90640 thermal + LIS3MDL magnetometer) ──────────
-// Both passive victim-detection sensors live on the ARM PCB's I2C bus now. The
-// arm ESP32 reads them in low-priority FreeRTOS tasks and forwards them over the
-// UART link; the Jetson bridge republishes /sensors/thermal + /sensors/mag.
-// Orientation still comes from the ZED2 (no IMU on the ESP32). Each sensor stays
-// idle until its bit is set in /sensors/enable_mask (GUI toggle → bridge →
-// MSG_SENSOR_ENABLE → Sensors::setEnabledMask), so a disabled sensor never even
-// touches the I2C bus.
-#define SENSOR_BIT_MAG       (1 << 0)  // LIS3MDL magnetometer (ARM PCB I2C)
-#define SENSOR_BIT_THERMAL   (1 << 1)  // MLX90640 thermal camera (ARM PCB I2C)
+// ─── Sensors (SENSOR ESP32 I2C: MLX90640 thermal + QMC5883L magnetometer) ────
+// Both passive victim-detection sensors live on the dedicated SENSOR ESP32's I2C
+// bus. It reads them in FreeRTOS tasks and forwards them over the UART link; the
+// Jetson bridge republishes /sensors/thermal + /sensors/mag. Orientation still
+// comes from the ZED2 (no IMU on the ESP32). Both sensors are ALWAYS ON — there
+// is no enable mask any more (MSG_SENSOR_ENABLE is reserved-unused); the GUI
+// toggles only gate what is *displayed*, never the acquisition.
+#define SENSOR_BIT_MAG       (1 << 0)  // QMC5883L magnetometer (SENSOR ESP32 I2C)
+#define SENSOR_BIT_THERMAL   (1 << 1)  // MLX90640 thermal camera (SENSOR ESP32 I2C)
 #define SENSOR_BIT_GAS       (1 << 2)  // reserved (sensor removed)
 #define SENSOR_BIT_IMU       (1 << 3)  // reserved (no IMU on the ESP32; orientation from ZED2)
 
-#define SENSOR_MAG_HZ           50     // LIS3MDL read rate (self-throttles around thermal reads)
+#define SENSOR_MAG_HZ           50     // magnetometer read rate (self-throttles around thermal reads)
+
+// ── QMC5883L magnetometer (GY-271 / HW-246 breakout) ─────────────────────────
+// The GY-271 is sold as "HMC5883L" but this one carries the QMC5883L clone
+// (I2C 0x0D, different register map — a genuine HMC sits at 0x1E and will NOT
+// answer here). Raw driver in lib/Sensors (no library dep): continuous mode,
+// 100 Hz ODR, OSR 512. Range is ±8 G — the QMC's max, chosen (like the old
+// LIS3MDL's 16 G) to avoid saturating near the BLDC motors; at ±8 G the scale
+// is 3000 LSB/G = 30 LSB/µT.
+#define QMC5883L_I2C_ADDR     0x0D
+#define QMC5883L_LSB_PER_UT     30     // ±8 G range: 3000 LSB/G ÷ 100 µT/G
 
 // ── MLX90640 thermal camera ───────────────────────────────────────────────────
 // 32×24 (cols×rows) array. getFrame() reads both sub-pages + runs the on-chip
@@ -505,8 +525,8 @@
 // existing GUI/bridge stay compatible; 0x04 gas / 0x09 main-PWM are
 // reserved-unused on this robot.)
 #define MSG_TELEMETRY        0x01      // PPM + state + track speed + flipper angle, 50 Hz
-#define MSG_SENSOR_THERMAL   0x02      // ARM PCB: MLX90640 frame (seq+min/max+768 quantised px), ~4 Hz
-#define MSG_SENSOR_MAG       0x03      // ARM PCB: LIS3MDL XYZ (int16 µT), 50 Hz
+#define MSG_SENSOR_THERMAL   0x02      // SENSOR ESP32: MLX90640 frame (seq+min/max+768 quantised px), ~4 Hz
+#define MSG_SENSOR_MAG       0x03      // SENSOR ESP32: QMC5883L XYZ (int16 µT), 50 Hz
 #define MSG_SENSOR_GAS       0x04      // reserved (sensor removed)
 #define MSG_STATUS           0x05      // system status / heartbeat
 #define MSG_SENSOR_IMU       0x06      // reserved (no IMU on the ESP32; orientation from ZED2)
@@ -522,7 +542,9 @@
 
 // PC → ESP32
 #define MSG_ARM_JOINTS       0x10      // 6 × int16 joint angles (deg × 100)
-#define MSG_SENSOR_ENABLE    0x11      // PC→ESP(ARM): 1-byte mask (bit0 mag, bit1 thermal)
+#define MSG_SENSOR_ENABLE    0x11      // RESERVED — the sensors are always-on on the
+                                       // SENSOR ESP32 now; the GUI toggles are
+                                       // display-only. Id kept so numbering is stable.
 #define MSG_ESTOP            0x12      // 0-byte payload — immediate stop
 #define MSG_ESTOP_CLEAR      0x13      // 0-byte payload — resume
 #define MSG_KEYBIND          0x14      // RESERVED — the per-channel keybind table was
@@ -543,22 +565,20 @@
 #define EXT_DRIVE_TIMEOUT_MS 300       // stale external command → fall back to RC
 
 // ─── FreeRTOS task layout ────────────────────────────────────────────────────
-// Core 0: protocol (comms + CAN).  Core 1: control (+ the ARM sensor tasks).
-//
-// The two ARM-only sensor tasks sit on core 1 BELOW the control task and never
-// run on core 0, so the arm CAN servicing (canTask) + UART RX (commsTask) on
-// core 0 keep full priority. They only consume core-1 idle time between the
-// 50 Hz control ticks, and the heavy MLX float compute is preempted instantly
-// whenever control is ready — the arm always wins (see the I2C section note).
+// Chassis/arm: core 0 = protocol (comms + CAN), core 1 = control.
+// Sensor board: core 0 = comms only, core 1 = the two sensor tasks — no
+// control/CAN tasks at all (bare DevKit, nothing to drive). The task priorities
+// below still keep the heavy MLX float compute at the bottom so the mag rate and
+// UART TX stay steady.
 #define TASK_CORE_COMMS      0
 #define TASK_CORE_CAN        0
 #define TASK_CORE_CONTROL    1
-#define TASK_CORE_SENSOR     1      // ARM only: mag + thermal, low priority
+#define TASK_CORE_SENSOR     1      // SENSOR board only: mag + thermal
 
 #define STACK_CONTROL     5120
 #define STACK_COMMS       4096
 #define STACK_CAN         4096
-#define STACK_SENSOR      4096      // LIS3MDL read + send
+#define STACK_SENSOR      4096      // QMC5883L read + send
 #define STACK_THERMAL     6144      // MLX90640 getFrame() + calibration + quantise
 
 #define PRIO_CONTROL         5      // highest — real-time loop

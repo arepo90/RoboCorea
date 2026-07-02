@@ -1,15 +1,16 @@
 # esp32_bridge
 
-RoboCorea Jetson-side ROS 2 (Humble) node that bridges two ESP32 binary UART
-links to ROS 2 topics. This is the "relay" core described in
+RoboCorea Jetson-side ROS 2 (Humble) node that bridges up to three ESP32 binary
+UART links to ROS 2 topics. This is the "relay" core described in
 [`../../../../reference/architecture.md`](../../../../reference/architecture.md):
-it runs on the Jetson Orin Nano, auto-identifies the chassis and arm PCBs from
-their firmware identity frames, publishes telemetry and motor status, and
-forwards commands to the owning board. The MLX90640 thermal camera + LIS3MDL
-magnetometer now live on the **arm PCB**; the bridge decodes their UART frames
-(`MSG_SENSOR_THERMAL` / `MSG_SENSOR_MAG`) and republishes `/sensors/thermal`
-(+`_raw`,`_status`) and `/sensors/mag`, and relays the GUI's
-`/sensors/enable_mask` down to the arm as `MSG_SENSOR_ENABLE`.
+it runs on the Jetson Orin Nano, auto-identifies the chassis PCB, arm PCB and
+sensor DevKit from their firmware identity frames, publishes telemetry and motor
+status, and forwards commands to the owning board. The MLX90640 thermal camera +
+QMC5883L (GY-271) magnetometer live on the dedicated **sensor ESP32**; the
+bridge decodes their UART frames (`MSG_SENSOR_THERMAL` / `MSG_SENSOR_MAG`) and
+republishes `/sensors/thermal` (+`_raw`,`_status`) and `/sensors/mag`. The
+sensors are always-on — there is no enable mask (the GUI toggles are
+display-only).
 
 The wire format is the packed binary protocol in the firmware's
 `include/robot_types.h`; the `struct` formats in `main_bridge.py` and constants
@@ -110,4 +111,4 @@ ros2 run esp32_bridge esp32_bridge --ros-args \
 
 > Not implemented here (by design): the GUI, computer vision, and
 > MoveIt/kinematics. The passive sensors (thermal + mag) are no longer separate
-> Jetson nodes — they're read on the arm PCB and republished by this bridge.
+> Jetson nodes — they're read on the sensor ESP32 and republished by this bridge.

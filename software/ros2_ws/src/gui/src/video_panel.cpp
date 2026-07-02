@@ -48,6 +48,22 @@ void VideoPanel::updateFilters(const QStringList& names)
         w->updateFilters(names);
 }
 
+void VideoPanel::setThermalDisplayed(bool shown)
+{
+    if (!shown) {
+        for (auto* w : widgets_)
+            w->deselectThermal();
+        return;
+    }
+    if (thermal_count_.load() > 0)
+        return;   // some cell already shows thermal — nothing to do
+    for (auto* w : widgets_)
+        if (w->selectThermalIfIdle())
+            return;
+    // No idle cell (or no thermal source discovered yet): leave it to the
+    // operator's per-cell source dropdown.
+}
+
 void VideoPanel::onWidgetThermalChanged(bool active)
 {
     int prev = thermal_count_.load();

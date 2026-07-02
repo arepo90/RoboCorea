@@ -25,15 +25,16 @@ class MagPlot;
 class SpeechProcessor;
 
 // Right-column dashboard: connection/heartbeat + uptime, a magnetometer readout
-// with an enable toggle, an orientation readout (from the ZED2 IMU), the software
-// e-stop, and the speech transcription panel + audio-monitor toggle.
+// with a show/hide toggle, an orientation readout (from the ZED2 IMU), the
+// software e-stop, and the speech transcription panel + audio-monitor toggle.
 //
 // RoboCorea changes vs legacy: no gas sensor; no ESP32 IMU (orientation comes
-// from the ZED2 camera, so it has no enable toggle). The magnetometer and thermal
-// camera now live on the arm PCB (read by the arm ESP32, relayed by esp32_bridge)
-// and honor /sensors/enable_mask: bit0 mag, bit1 thermal (driven by the video
-// panel's thermal selection, not a button). The mask is unchanged — the bridge
-// forwards it down as MSG_SENSOR_ENABLE. Audio is the Opus track demuxed from the
+// from the ZED2 camera, so it has no toggle). The magnetometer and thermal
+// camera live on the dedicated sensor ESP32 (relayed by esp32_bridge) and are
+// ALWAYS ON — there is no /sensors/enable_mask any more. The dashboard toggles
+// are display-only: the mag toggle shows/hides the readout+graph, the thermal
+// toggle shows/hides the thermal source in the video cells (and mirrors the
+// video panel's thermal selection). Audio is the Opus track demuxed from the
 // C920 A/V stream, not a ROS topic.
 class DashboardPanel : public QWidget {
     Q_OBJECT
@@ -51,6 +52,10 @@ public:
 
 signals:
     void resetSourcesRequested();
+    // Thermal display toggle (display-only; acquisition is always-on): true asks
+    // the video panel to show the thermal source in a free cell, false deselects
+    // it from every cell.
+    void thermalDisplayToggled(bool shown);
     void settingsRequested();
     void systemsRequested();   // open the Robot Systems window (toolbar icon)
     void audioMonitorToggled(bool enabled);  // → GstAvStream playback (robot mic → speaker)
@@ -94,12 +99,11 @@ private slots:
     void onArmClicked();
     void onDisarmClicked();
     void onArmModeToggle();
-    // Thermal acquisition enable (/sensors/enable_mask bit1).
+    // Thermal display toggle (display-only; acquisition is always-on).
     void onThermalToggled();
 
 private:
     void setConnState(const QString& color, const QString& label);
-    void publishSensorMask();
     void callArmTrigger(const rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr& cli,
                         const char* what);
     // Recolor the per-joint CAN dots from the latest presence mask, but only
@@ -142,10 +146,9 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::MagneticField>::SharedPtr mag_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
 
-    // Sensor enable mask toggles (bit0=mag, bit1=thermal driven by the video panel).
+    // Magnetometer display toggle (display-only — the sensor always publishes;
+    // off just freezes the readout/graph and shows dashes).
     QPushButton* mag_toggle_;
-    uint8_t      sensor_mask_{0};
-    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr sensor_mask_pub_;
 
     // Controls
     QPushButton* clear_btn_;
@@ -189,9 +192,9 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_dexterity_cli_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_chassis_cli_;
 
-    // ── Thermal acquisition enable (/sensors/enable_mask bit1) ────────────────
-    // The dashboard owns the enable mask; esp32_bridge relays it to the arm PCB
-    // (MSG_SENSOR_ENABLE). Also auto-driven by the video panel's thermal source
-    // selection (setThermalEnabled).
-    QPushButton* thermal_toggle_{nullptr};   // /sensors/enable_mask bit1
+    // ── Thermal display toggle (display-only; acquisition is always-on) ───────
+    // Toggling drives the video panel via thermalDisplayToggled(); it is also
+    // auto-driven by the video panel's thermal source selection
+    // (setThermalEnabled), so it mirrors whether any cell shows thermal.
+    QPushButton* thermal_toggle_{nullptr};
 };

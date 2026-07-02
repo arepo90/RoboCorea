@@ -12,7 +12,6 @@
 // callbacks are dispatched from within it.
 
 using ArmJointsCallback    = void(*)(const ArmJointsPayload&);
-using SensorEnableCallback = void(*)(uint8_t mask);
 using EstopCallback        = void(*)(bool active);
 using PpmCalibCallback     = void(*)(const PpmCalibPayload&);
 using ArmLifecycleCallback = void(*)(bool arm);   // true = arm/init, false = disarm
@@ -41,7 +40,6 @@ public:
 
     // ── Callback registration ─────────────────────────────────────────────────
     static void onArmJoints(ArmJointsCallback cb)      { s_cb_arm = cb; }
-    static void onSensorEnable(SensorEnableCallback cb) { s_cb_sensor = cb; }
     static void onEstop(EstopCallback cb)               { s_cb_estop = cb; }
     static void onPpmCalib(PpmCalibCallback cb)         { s_cb_ppm_calib = cb; }
     static void onArmLifecycle(ArmLifecycleCallback cb) { s_cb_arm_life = cb; }
@@ -67,7 +65,6 @@ private:
     static uint32_t s_last_rx_ms;
 
     static ArmJointsCallback    s_cb_arm;
-    static SensorEnableCallback s_cb_sensor;
     static EstopCallback        s_cb_estop;
     static PpmCalibCallback     s_cb_ppm_calib;
     static ArmLifecycleCallback s_cb_arm_life;

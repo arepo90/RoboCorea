@@ -32,11 +32,11 @@ struct ArmJoints {
 
 // ─── Magnetometer ─────────────────────────────────────────────────────────────
 struct MagData {
-    int  x_uT, y_uT, z_uT;   // microtesla (LIS3MDL, ARM PCB I2C)
+    int  x_uT, y_uT, z_uT;   // microtesla (QMC5883L, SENSOR ESP32 I2C)
     bool valid;
 };
 
-// ─── Thermal camera (MLX90640, ARM PCB I2C) ──────────────────────────────────
+// ─── Thermal camera (MLX90640, SENSOR ESP32 I2C) ─────────────────────────────
 // Latest decoded frame in °C, row-major (THERMAL_ROWS × THERMAL_COLS). Filled by
 // the thermal task; quantised to the packed ThermalFramePayload before TX.
 struct ThermalData {
@@ -73,12 +73,8 @@ struct ArmJointsPayload {
     int16_t joint[6];              // degrees × 100
 };
 
-struct SensorEnablePayload {
-    uint8_t mask;
-};
-
 struct MagPayload {
-    int16_t x_uT;                  // microtesla (±32767 µT covers the 16-gauss range)
+    int16_t x_uT;                  // microtesla (±32767 µT covers the QMC5883L ±8 G range)
     int16_t y_uT;
     int16_t z_uT;
 };
@@ -225,4 +221,3 @@ static_assert(sizeof(BoardIdentityPayload) == 4, "BoardIdentityPayload size");
 static_assert(sizeof(ArmLifecyclePayload) == 11, "ArmLifecyclePayload size");
 static_assert(sizeof(ArmJointsPayload)   == 12, "ArmJointsPayload size");
 static_assert(sizeof(PpmCalibPayload)    == 38, "PpmCalibPayload size");
-static_assert(sizeof(SensorEnablePayload) == 1, "SensorEnablePayload size");

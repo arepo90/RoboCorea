@@ -2,7 +2,6 @@
 #include "config.h"
 #include "RC.h"
 #include "Locomotion.h"
-#include "Sensors.h"
 #include "CANInterface.h"
 #include "Comms.h"
 #include "Gripper.h"
@@ -12,7 +11,6 @@
 
 RobotMode    Control::s_mode          = RobotMode::INIT;
 ArmJoints    Control::s_arm_joints    = {};
-uint8_t      Control::s_sensor_mask   = 0;
 bool         Control::s_hw_estop      = false;
 bool         Control::s_virtual_estop = false;
 bool         Control::s_virtual_flip  = false;
@@ -42,15 +40,6 @@ void Control::begin() {
         Control::setArmJoints(p);
 #else
         (void)p;
-#endif
-    });
-    Comms::onSensorEnable([](uint8_t mask) {
-#if ROBOCOREA_ROLE_IS_ARM
-        // Passive sensors live on the ARM PCB now; the GUI's /sensors/enable_mask
-        // is relayed here (bit0 mag, bit1 thermal) → Sensors gates each one.
-        Control::setSensorMask(mask);
-#else
-        (void)mask;
 #endif
     });
     Comms::onEstop(       [](bool active) {
@@ -360,17 +349,6 @@ void Control::setArmJoints(const ArmJointsPayload& payload) {
 #endif
 }
 
-void Control::setSensorMask(uint8_t mask) {
-#if ROBOCOREA_ROLE_IS_ARM
-    portENTER_CRITICAL(&s_mux);
-    s_sensor_mask = mask;
-    portEXIT_CRITICAL(&s_mux);
-    Sensors::setEnabledMask(mask);
-#else
-    (void)mask;
-#endif
-}
-
 void Control::setExternalTraction(float left, float right, bool enable) {
 #if ROBOCOREA_ROLE_IS_CHASSIS
     // Stored here; applyControl() arbitrates against the RC sticks every loop and
@@ -396,7 +374,9 @@ RobotMode Control::getMode() {
 void Control::getSystemStatus(SystemStatus& out) {
     portENTER_CRITICAL(&s_mux);
     out.mode         = s_mode;
-    out.sensor_mask  = s_sensor_mask;
+    // Sensors moved to the dedicated SENSOR ESP32 (always-on); field kept so the
+    // status payload layout is stable.
+    out.sensor_mask  = 0;
     out.estop        = (s_mode == RobotMode::ESTOP);
     out.virtual_flip = s_virtual_flip;
     portEXIT_CRITICAL(&s_mux);

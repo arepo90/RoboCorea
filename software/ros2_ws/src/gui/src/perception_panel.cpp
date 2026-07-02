@@ -72,9 +72,9 @@ PerceptionPanel::PerceptionPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
              "(systemd rescue-sensors.target via robot_manager)",
              "Cleanly stop the ZED + RPLidar stack on the robot");
 
-    // (No I2C-sensor stack: the MLX90640 thermal camera + LIS3MDL magnetometer
-    // moved to the arm PCB and are relayed by esp32_bridge. Enable/disable is the
-    // dashboard's thermal/mag toggles via /sensors/enable_mask, not a stack here.)
+    // (No I2C-sensor stack: the MLX90640 thermal camera + QMC5883L magnetometer
+    // live on the dedicated sensor ESP32, always-on, relayed by esp32_bridge. The
+    // dashboard's thermal/mag toggles are display-only — nothing to start here.)
 
     open_map_btn_ = new QPushButton("Open 2D Map", this);
     open_map_btn_->setMinimumHeight(28);

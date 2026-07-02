@@ -10,14 +10,16 @@ MAX_PAYLOAD_LEN = 2048
 
 ROLE_CHASSIS = 1
 ROLE_ARM = 2
+ROLE_SENSOR = 3
 ROLE_NAMES = {
     ROLE_CHASSIS: 'chassis',
     ROLE_ARM: 'arm',
+    ROLE_SENSOR: 'sensor',
 }
 
 MSG_TELEMETRY = 0x01
-MSG_SENSOR_THERMAL = 0x02  # ARM PCB: MLX90640 frame (seq + min/max + 768 quantised px)
-MSG_MAG = 0x03  # ARM PCB: LIS3MDL XYZ (int16 µT)
+MSG_SENSOR_THERMAL = 0x02  # SENSOR ESP32: MLX90640 frame (seq + min/max + 768 quantised px)
+MSG_MAG = 0x03  # SENSOR ESP32: QMC5883L XYZ (int16 µT)
 MSG_STATUS = 0x05
 MSG_ENCODER_EXT = 0x07
 MSG_VESC_STATUS = 0x08
@@ -29,7 +31,7 @@ MSG_ARM_LIFECYCLE = 0x0E
 MSG_BOARD_IDENTITY = 0x0F
 
 MSG_ARM_JOINTS = 0x10
-MSG_SENSOR_ENABLE = 0x11  # PC→ARM: 1-byte mask (bit0 mag, bit1 thermal) for the arm-PCB sensors
+MSG_SENSOR_ENABLE = 0x11  # RESERVED — sensors are always-on on the SENSOR ESP32; GUI toggles are display-only
 MSG_ESTOP = 0x12
 MSG_ESTOP_CLEAR = 0x13
 MSG_KEYBIND = 0x14
@@ -43,10 +45,10 @@ MSG_TRACTION_CMD = 0x1A  # 2×int16 normalised L/R track speed ×1000 + u8 enabl
 CAP_CHASSIS_IO = 1 << 0
 CAP_ARM_IO = 1 << 1
 CAP_RC_PPM = 1 << 2
-CAP_MAG = 1 << 3  # LIS3MDL on the ARM PCB I2C bus
+CAP_MAG = 1 << 3  # QMC5883L (GY-271) on the SENSOR ESP32 I2C bus
 CAP_VESC_BASE = 1 << 4
 CAP_ARM_CAN = 1 << 5
-CAP_THERMAL = 1 << 6  # MLX90640 on the ARM PCB I2C bus
+CAP_THERMAL = 1 << 6  # MLX90640 on the SENSOR ESP32 I2C bus
 
 
 @dataclass(frozen=True)
@@ -87,11 +89,6 @@ THERMAL_ROWS = 24
 THERMAL_PIXELS = THERMAL_COLS * THERMAL_ROWS
 # ThermalFramePayload header: seq u16, min_c100 i16, max_c100 i16, cols u8, rows u8.
 _THERMAL_HEADER = struct.Struct('<HhhBB')
-
-
-def build_sensor_enable(mask: int) -> bytes:
-    """PC→ARM sensor enable mask (MSG_SENSOR_ENABLE): bit0 mag, bit1 thermal."""
-    return build_frame(MSG_SENSOR_ENABLE, bytes([int(mask) & 0xFF]))
 
 
 def parse_thermal_header(payload: bytes):

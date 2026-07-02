@@ -510,10 +510,12 @@ centre.
 - **Lidar:** `/dev/rplidar` missing → install the udev rule (§0.3); wrong port; cable.
   `ros2 topic hz /scan`.
 
-**Thermal / magnetometer readout dead.** They are on the **arm PCB** now (not the
-Jetson) — so they need the **arm board's USB link up** (§B) and the dashboard
-**Thermal/Mag enable** toggles on (`/sensors/enable_mask`). `ros2 topic hz
-/sensors/thermal` / `/sensors/mag`. No Jetson I2C is involved.
+**Thermal / magnetometer readout dead.** They are on the dedicated **sensor
+ESP32** (a bare DevKit on Jetson USB) and publish **always-on** — the dashboard
+Thermal/Mag toggles only gate the *display*, so an OFF toggle just hides data.
+Check the sensor board's USB link (§B; the bridge should log it identifying as
+`sensor`) and `ros2 topic hz /sensors/thermal` / `/sensors/mag`. No Jetson I2C
+is involved.
 
 ### F. Mapping / SLAM
 

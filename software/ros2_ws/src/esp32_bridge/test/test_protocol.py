@@ -4,11 +4,11 @@ from esp32_bridge.protocol import (
     MSG_BOARD_IDENTITY,
     MSG_ESTOP,
     MSG_ESTOP_CLEAR,
-    MSG_SENSOR_ENABLE,
     MSG_SENSOR_THERMAL,
     MSG_TRACTION_CMD,
     ROLE_ARM,
     ROLE_CHASSIS,
+    ROLE_SENSOR,
     THERMAL_COLS,
     THERMAL_PIXELS,
     THERMAL_ROWS,
@@ -17,7 +17,6 @@ from esp32_bridge.protocol import (
     FrameParser,
     RoleRouteTable,
     build_frame,
-    build_sensor_enable,
     build_traction_cmd,
     parse_identity,
     parse_thermal_header,
@@ -78,12 +77,23 @@ def test_build_traction_cmd_roundtrips_and_clamps():
     assert (left, right, enable) == (1000, -1000, 0)
 
 
-def test_build_sensor_enable_frames_a_single_mask_byte():
-    parsed = FrameParser().feed(build_sensor_enable(0b11))
-    assert parsed == [(MSG_SENSOR_ENABLE, b'\x03')]
-    # Only the low byte is kept.
-    _, payload = FrameParser().feed(build_sensor_enable(0x1FF))[0]
-    assert payload == b'\xFF'
+def test_sensor_role_routes_independently_of_chassis_and_arm():
+    # The dedicated sensor ESP32 binds as its own role (3, 'sensor') so its
+    # mag/thermal frames dispatch separately from the chassis/arm links.
+    routes = RoleRouteTable()
+    sensor = FakeLink()
+    arm = FakeLink()
+
+    identity = parse_identity(struct.pack('<BBH', ROLE_SENSOR, 1, 0x0048))
+    assert identity.role == ROLE_SENSOR
+    assert identity.role_name == 'sensor'
+
+    assert routes.assign(sensor, identity) is None
+    assert routes.assign(arm, BoardIdentity(ROLE_ARM, 1, 0)) is None
+    assert routes.get(ROLE_SENSOR) is sensor
+    routes.clear_link(sensor)
+    assert routes.get(ROLE_SENSOR) is None
+    assert routes.get(ROLE_ARM) is arm
 
 
 def test_parse_thermal_header_matches_firmware_wire_format():

@@ -1,8 +1,9 @@
 # RoboCorea ESP32 firmware
 
-PlatformIO project (DOIT ESP32 DevKit V1, custom PCB) for the robot's real-time
-I/O. Two identical PCBs run this same firmware: one built as **chassis** and one
-built as **arm**. The only intended per-board difference is
+PlatformIO project (DOIT ESP32 DevKit V1) for the robot's real-time I/O. Three
+boards run this same firmware: two custom PCBs built as **chassis** and **arm**,
+plus a bare DevKit built as **sensor** (I2C victim-detection sensors only — no
+CAN transceiver, no RC). The only intended per-board difference is
 `ROBOCOREA_BOARD_ROLE` in `include/config.h`.
 
 For the whole-system picture see [`../../reference/architecture.md`](../../reference/architecture.md).
@@ -14,25 +15,31 @@ For the whole-system picture see [`../../reference/architecture.md`](../../refer
 | Subsystem | Description |
 |-----------|-------------|
 | **RC input** | Decodes a 6-channel PPM stream from the FlySky FS-iA6B on `GPIO4` (ISR). |
-| **Board role** | `ROBOCOREA_BOARD_ROLE_CHASSIS` owns RC, traction, flippers, and wheel-odom VESC telemetry. `ROBOCOREA_BOARD_ROLE_ARM` owns ODrive/ZE300/LKTech arm CAN. |
+| **Board role** | `ROBOCOREA_BOARD_ROLE_CHASSIS` owns RC, traction, flippers, and wheel-odom VESC telemetry. `ROBOCOREA_BOARD_ROLE_ARM` owns ODrive/ZE300/LKTech arm CAN. `ROBOCOREA_BOARD_ROLE_SENSOR` owns the I2C sensors (bare DevKit; compiles out CAN/RC/gripper). |
 | **Control scheme (fixed)** | No keybind table. Ch3=traction fwd, Ch4=turn, Ch2=flipper rate, Ch1=flipper L/R selector (min/center/max = left/both/right), Ch5=2-state pair select (min=front FL·FR, max=rear RL·RR), Ch6=3-position lever (down=E-STOP, center=normal, up=virtual-flip). Drive + flippers are always active together. See `config.h` "Channel roles". |
 | **Virtual flip (Ch6 up)** | "Drive from the other end" — a 180° remap of the control frame (negate forward, swap front/rear pair, mirror flipper L/R; turn is left as-is) so the symmetric robot can back out of a dead end without turning around. Signs are `VFLIP_*` macros in `config.h`. |
 | **Traction** | 2 VESCs, differential drive, `SET_RPM` velocity commands. |
 | **Flippers** | 4 VESCs. The **position loop runs on the VESC** (LispBM — see [`../VESC/flipper_position.lisp`](../VESC/flipper_position.lisp)). The ESP integrates the stick into a target angle, sends it through the fake-RPM carrier, and reports measured `[FL, FR, RL, RR]` angles from STATUS_5 tachometer feedback. Center stick = hold; no separate encoders. |
 | **Arm relay** | Arm-role firmware relays workstation joint commands (gamepad → IK) to CAN whenever armed & not e-stopped: ODrive J1–J3, ZE300 J4, LKTech J5–J6. |
 | **Arm operating mode** | Dexterity controls J1–J6. Chassis/transport keeps J1–J4 controlled and sends LKTech J5/J6 to motor-stop (torque-off). |
-| **Sensors** | The **arm PCB** hosts the LIS3MDL magnetometer + MLX90640 thermal camera on its I2C bus (low-priority tasks, forwarded over UART, republished by `esp32_bridge`). The chassis has no passive sensors. Orientation comes from the ZED2; there is no gas sensor. |
+| **Sensors** | The dedicated **sensor ESP32** hosts the QMC5883L magnetometer (GY-271/HW-246 breakout, I2C 0x0D) + MLX90640 thermal camera on its I2C bus, **always-on** (no enable mask — the GUI toggles are display-only), forwarded over UART and republished by `esp32_bridge`. The chassis and arm PCBs have no passive sensors. Orientation comes from the ZED2; there is no gas sensor. |
 | **Protocol** | Binary UART at 921600 baud to the Jetson. Each board periodically sends `MSG_BOARD_IDENTITY`, then only publishes the telemetry owned by its role. |
 
 ---
 
 ## Architecture (FreeRTOS)
 
-| Core | Task | Rate | Prio | Purpose |
-|------|------|------|------|---------|
-| 1 | `controlTask` | 50 Hz | 5 | Chassis: RC/base FSM. Arm: relay latest joint command while armed. |
-| 0 | `commsTask`   | 50 Hz | 4 | UART RX parse + identity + role-owned telemetry TX |
-| 0 | `canTask`     | 200 Hz | 4 | Chassis: VESC CAN. Arm: ODrive/ZE300/LKTech CAN. |
+| Core | Task | Role | Rate | Prio | Purpose |
+|------|------|------|------|------|---------|
+| 1 | `controlTask` | chassis/arm | 50 Hz | 5 | Chassis: RC/base FSM. Arm: relay latest joint command while armed. |
+| 0 | `commsTask`   | all | 50 Hz | 4 | UART RX parse + identity + role-owned telemetry TX |
+| 0 | `canTask`     | chassis/arm | 200 Hz | 4 | Chassis: VESC CAN. Arm: ODrive/ZE300/LKTech CAN. |
+| 1 | `sensorTask`  | **sensor** | 50 Hz | 2 | QMC5883L read → `MSG_SENSOR_MAG` |
+| 1 | `thermalTask` | **sensor** | ~4 Hz | 1 | MLX90640 `getFrame()` (blocks ~250 ms) → quantise → `MSG_SENSOR_THERMAL` |
+
+The sensor board runs only `commsTask` + the two sensor tasks (no CAN/control);
+an I2C mutex in `Sensors` serialises the shared bus, and a mag read that lands
+mid-thermal-frame is skipped rather than blocked.
 
 All UART transmission is funnelled through a mutex in `Comms` so frames from
 `commsTask` and the occasional gripper frame from `controlTask` never interleave.
@@ -130,22 +137,22 @@ and must stay in sync with the Jetson bridge `struct` formats.
 | Dir | Type | Name |
 |-----|------|------|
 | → PC | 0x01 | Telemetry (mode, flags, PPM[6], track speeds, flipper angle, uptime) |
-| → PC | 0x02 | Thermal frame (arm PCB: seq, min/max °C×100, cols/rows, 768 quantised px) |
-| → PC | 0x03 | Magnetometer (arm PCB: LIS3MDL XYZ, 3× int16 µT) |
+| → PC | 0x02 | Thermal frame (sensor ESP32: seq, min/max °C×100, cols/rows, 768 quantised px) |
+| → PC | 0x03 | Magnetometer (sensor ESP32: QMC5883L XYZ, 3× int16 µT) |
 | → PC | 0x05 | Status |
 | → PC | 0x07 | Flipper angles (FL,FR,RL,RR) |
 | → PC | 0x08 | VESC status (incl. tachometer → track odometry) |
 | → PC | 0x0A / 0x0B / 0x0C / 0x0D | ODrive / LKTech / ZE300 status, ODrive error |
 | → PC | 0x0E / 0x0F | Arm lifecycle / board identity |
 | ← PC | 0x10 | Arm joints (6 × int16 deg×100) |
-| ← PC | 0x11 | Sensor enable mask (arm PCB: bit0 mag, bit1 thermal) |
+| ← PC | 0x11 | *(reserved)* was the sensor enable mask — sensors are always-on now |
 | ← PC | 0x12 / 0x13 | E-stop / clear |
 | ← PC | 0x19 | Arm operating mode: `0` dexterity, `1` chassis |
 | ← PC | 0x14 | *(reserved — was the keybind table; RC scheme is fixed now)* |
 | ← PC | 0x15 | PPM calibration |
 | ← PC | 0x16 | Gripper (→ PC originates; reserved) |
 
-(0x02 thermal + 0x03 magnetometer are sent by the **arm PCB** and republished by
+(0x02 thermal + 0x03 magnetometer are sent by the **sensor ESP32** and republished by
 `esp32_bridge`. 0x04 gas, 0x06 IMU, 0x09 main-PWM stay reserved-unused but the
 numbering is kept stable for GUI compatibility. Orientation comes from the ZED2
 camera on the Jetson, not the ESP32.)
@@ -182,10 +189,10 @@ lib/      RC/             PPM decode (ISR) + calibration
           Locomotion/     drivetrain output (track mix + flipper angle/hold)
           CANInterface/   CAN HAL (MCP2515/TWAI) + VESC/ODrive/ZE300/LKTech
           Comms/          binary UART protocol
-          Sensors/        arm-PCB I2C: LIS3MDL mag + MLX90640 thermal (ARM role)
+          Sensors/        sensor-ESP32 I2C: QMC5883L mag + MLX90640 thermal (SENSOR role)
           Gripper/        end-effector servo (LEDC PWM, ARM role)
           PID/            reusable PID (linear + shortest-angle) — spare
-src/      main.cpp        setup() + FreeRTOS tasks (arm adds sensor + thermal tasks)
+src/      main.cpp        setup() + FreeRTOS tasks (sensor role runs comms + sensor + thermal only)
 
 ../VESC/  flipper_position.lisp   position loop that runs ON the flipper VESCs
 ```
@@ -201,7 +208,8 @@ pio device monitor # only shows text if ENABLE_COMMS is disabled in config.h
 ```
 
 Leave `ROBOCOREA_BOARD_ROLE` as `ROBOCOREA_BOARD_ROLE_CHASSIS` for the chassis
-PCB. Change only that macro to `ROBOCOREA_BOARD_ROLE_ARM` before building and
-flashing the arm PCB. Confirm pins, CAN IDs, gear ratios, directions, and PID
+PCB. Change only that macro to `ROBOCOREA_BOARD_ROLE_ARM` (arm PCB) or
+`ROBOCOREA_BOARD_ROLE_SENSOR` (bare sensor DevKit) before building and
+flashing that board. Confirm pins, CAN IDs, gear ratios, directions, and PID
 gains against the real hardware before commanding motors. Bring up motors one at
 a time with small commands.

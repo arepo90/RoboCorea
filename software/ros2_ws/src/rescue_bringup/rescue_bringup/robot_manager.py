@@ -24,8 +24,8 @@ stack `<name>` it exposes:
 
 Default stacks:
   sensors -> rescue-sensors.target   (members: zed.service, lidar.service)
-  (The MLX90640 + LIS3MDL moved to the arm PCB / esp32_bridge, so there is no
-   longer a Jetson 'i2c' sensor stack to start/stop here.)
+  (The MLX90640 + QMC5883L live on the dedicated sensor ESP32 / esp32_bridge,
+   always-on, so there is no Jetson 'i2c' sensor stack to start/stop here.)
 
 Parameters
   stacks          (str[])    stack names to manage   [sensors, mapping, ...]
@@ -72,10 +72,10 @@ class RobotManager(Node):
     def __init__(self):
         super().__init__('robot_manager')
 
-        # NOTE: there is no 'i2c' stack — the MLX90640 thermal camera + LIS3MDL
-        # magnetometer moved to the ARM PCB (read by the arm ESP32, relayed by
-        # esp32_bridge as /sensors/thermal + /sensors/mag). Enable/disable is the
-        # GUI's /sensors/enable_mask, not a systemd stack here.
+        # NOTE: there is no 'i2c' stack — the MLX90640 thermal camera + QMC5883L
+        # magnetometer live on the dedicated sensor ESP32 (relayed by esp32_bridge
+        # as /sensors/thermal + /sensors/mag), always-on. The GUI toggles are
+        # display-only; nothing to start/stop here.
         self.declare_parameter(
             'stacks',
             ['sensors', 'mapping', 'mapping3d', 'localization', 'navigation'])

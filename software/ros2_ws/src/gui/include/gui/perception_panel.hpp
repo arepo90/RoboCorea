@@ -23,9 +23,9 @@
 // The Navigation start is gated by nav_preflight readiness (/nav/preflight): the
 // critical scan/odom/tf/map checks must pass before Nav2 will be started.
 //
-// The MLX90640 + LIS3MDL no longer have a Jetson 'i2c' stack — they moved to the
-// arm PCB (relayed by esp32_bridge). Their per-sensor enable toggles
-// (mag/thermal /sensors/enable_mask) stay on the dashboard with their readouts.
+// The MLX90640 + QMC5883L have no Jetson 'i2c' stack — they live on the dedicated
+// sensor ESP32 (always-on, relayed by esp32_bridge). Their display-only show/hide
+// toggles stay on the dashboard with their readouts.
 class MapWindow;
 
 class PerceptionPanel : public QWidget {

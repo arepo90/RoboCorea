@@ -68,6 +68,14 @@ public:
     void updateSources(const QStringList& names, const QStringList& identifiers);
     void updateFilters(const QStringList& names);
 
+    // Dashboard "Thermal display" toggle helpers (display-only — the thermal
+    // topic always publishes). deselectThermal drops a thermal selection back to
+    // "None"; selectThermalIfIdle picks the first thermal source when this cell
+    // currently shows nothing. Both drive the source combo, so the normal
+    // selection path (subscribe/unsubscribe + thermalActiveChanged) applies.
+    void deselectThermal();
+    bool selectThermalIfIdle();
+
     // Enable zoom/pan (only while the cell is enlarged). Disabling resets the
     // view to fit, so collapsing back to the 2×2 grid always shows the full frame.
     void setInteractive(bool on);

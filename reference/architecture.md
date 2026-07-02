@@ -80,11 +80,11 @@ stack) and makes these deliberate changes:
 | Flipper drivers | VESC | VESC; **position loop runs on the VESC** (LispBM), not the ESP32 |
 | Base position feedback | Quadrature encoders on ESP32 PCNT | **Hall feedback via the VESC over CAN** (no separate encoders); the VESC **tachometer** is forwarded for wheel odometry |
 | Odometry | Quadrature encoders | **ZED2 VIO + VESC-tachometer wheel odom**, to be fused by a planned `robot_localization` EKF |
-| Thermal camera | MLX90640 on the **ESP32** I2C bus | MLX90640 on the **arm-PCB ESP32** I2C bus, relayed by `esp32_bridge` (Jetson I2C proved unreliable) |
-| Magnetometer | QMC5883L / LIS3MDL on the ESP32 I2C bus | **LIS3MDL on the arm-PCB ESP32** I2C bus, relayed by `esp32_bridge` |
-| Sensors on ESP32 | BNO055 IMU, QMC5883L mag, MQ2 gas | **Thermal + mag on the arm PCB** (read by the arm ESP32, forwarded over UART). **IMU dropped — orientation now from the ZED2**; gas sensor dropped |
+| Thermal camera | MLX90640 on the **ESP32** I2C bus | MLX90640 on the dedicated **sensor ESP32** (bare DevKit) I2C bus, relayed by `esp32_bridge` (Jetson I2C proved unreliable; the arm PCB hosted it for a while) |
+| Magnetometer | QMC5883L / LIS3MDL on the ESP32 I2C bus | **QMC5883L (GY-271/HW-246) on the sensor ESP32** I2C bus, relayed by `esp32_bridge` |
+| Sensors on ESP32 | BNO055 IMU, QMC5883L mag, MQ2 gas | **Thermal + mag on a dedicated sensor ESP32** (bare DevKit, always-on, forwarded over UART). **IMU dropped — orientation now from the ZED2**; gas sensor dropped |
 | Robot↔PC link | micro-ROS *or* serial | **Plain serial** + a ROS 2 bridge node (preferred) |
-| Cameras | Streamed from robot over the network (GStreamer) | **RF analog cams → USB digitizers at the workstation** (driving) **+ 2× C920 on the Jetson → onboard H.264 (+Opus) over SRT** (inspection/CV); thermal still via ROS (now from the arm PCB through the bridge) |
+| Cameras | Streamed from robot over the network (GStreamer) | **RF analog cams → USB digitizers at the workstation** (driving) **+ 2× C920 on the Jetson → onboard H.264 (+Opus) over SRT** (inspection/CV); thermal still via ROS (from the sensor ESP32 through the bridge) |
 | Arm | ODrive J1–J3 + ZE300 J4 + LKTech J5–J6 | **Unchanged** — same mixed-CAN arm |
 
 Everything else (the arm CAN protocols, the binary protocol framing, the GUI
@@ -108,7 +108,7 @@ operator)                              │ binary UART                 │      
         │   │ 6× VESC                      │  │   ┌── Arm PCB / ESP32 ──────┐ │
         │   │ 2 traction + 4 flipper       │  │   │ arm CAN relay ·         │ │
         │   └──────────────────────────────┘  │   │ lifecycle · UART ·      │ │
-        │                                     │   │ I2C: MLX90640 + LIS3MDL │ │
+        │                                     │   │ gripper servo (GPIO26)  │ │
         │                                     │   └──┬──────────┬──────────┘ │
         │                                     │ CAN  │          │ USB         │
         │                                     │ 500k ▼          │ serial      │
@@ -118,11 +118,11 @@ operator)                              │ binary UART                 │      
         │                                                        ▼             │
         │   2× C920 ──────────USB───►┌──────────── Jetson Orin Nano ────────┐ │
         │   ZED2 stereo ──────USB───►│   ROS 2 Humble (Ubuntu 22.04)        │ │
-        │   RPLidar A2M12 ────USB───►│   • esp32_bridge (2× serial ⇄ topics;│ │
-        │   RF cams ╳ (driving;      │     republishes thermal + mag)       │ │
-        │   → workstation)           │   • c920 H.264+Opus → SRT (front)    │ │
-        │                            │   • ZED2 / lidar drivers (future)    │ │
-        │                            └───────────────┬──────────────────────┘ │
+        │   RPLidar A2M12 ────USB───►│   • esp32_bridge (3× serial ⇄ topics;│ │
+        │   Sensor ESP32 ─────USB───►│     republishes thermal + mag)       │ │
+        │   (MLX90640 + QMC5883L)    │   • c920 H.264+Opus → SRT (front)    │ │
+        │   RF cams ╳ (driving; →    │   • ZED2 / lidar drivers (future)    │ │
+        │   workstation)             └───────────────┬──────────────────────┘ │
         └────────────────────────────────────────────┼─────────────────────────┘
                                                       │ Wi-Fi / Ethernet
                            ROS 2 DDS (telemetry/cmds)  +  SRT (H.264 video + Opus)
@@ -155,7 +155,7 @@ USB cameras on the Jetson** are the *inspection / CV* feed: the Jetson streams
 their onboard H.264 (and the front camera's mic as Opus) over **SRT** straight
 into the GUI — a dedicated low-latency media transport tuned for the degraded
 competition link, **not** ROS/DDS. Only the tiny **thermal** image traverses ROS
-(read on the **arm PCB**, forwarded over UART, and republished as an `Image`
+(read on the **sensor ESP32**, forwarded over UART, and republished as an `Image`
 topic by `esp32_bridge`). Rationale + tuning:
 [`software/ros2_ws/src/gui/README.md`](../software/ros2_ws/src/gui/README.md).
 
@@ -167,14 +167,15 @@ topic by `esp32_bridge`). Rationale + tuning:
 |-----------|-----|------------|-------|
 | 6S 8 Ah LiPo battery | 1 | — | ~25.2 V full, ~22.2 V nominal. Powers everything. |
 | Custom PCB w/ ESP32 | 2 | USB serial → Jetson; CAN per board | Identical hardware and firmware. `ROBOCOREA_BOARD_ROLE` selects **chassis** or **arm** at build time. |
+| Sensor ESP32 (bare DOIT DevKit V1) | 1 | USB serial → Jetson; I2C sensors | Same firmware, `ROBOCOREA_BOARD_ROLE_SENSOR` build — no CAN transceiver, no RC. Hosts the passive victim-detection sensors, always-on. |
 | BLDC motor (traction) | 2 | VESC → CAN | Left/right tracks, differential drive. **23.333:1** reduction. Hall sensors. |
 | BLDC motor (flipper) | 4 | VESC → CAN | FL, FR, RL, RR. Position-controlled (0–360°, wraps). **100:1** reduction. Hall sensors. |
 | VESC mini 6.7 Pro | 6 | CAN (MCP2515) | One per base motor. Traction = velocity (`SET_RPM`); flippers = position via an on-board LispBM script. Set each to **500 kbps** CAN before bus-up. |
 | FlySky FS-iA6B receiver | 1 | PPM → chassis ESP32 GPIO4 | 6 channels multiplexed on one PPM wire. Paired with the operator's FlySky transmitter. |
 | 6-DOF robotic arm | 1 | Mixed CAN → arm ESP32 | J1–J3 ODrive, J4 ZE300, J5–J6 LKTech. See §8. Driven on the **arm PCB's separate CAN bus**. |
 | NVIDIA Jetson Orin Nano | 1 | USB to both ESP32 PCBs; USB for sensors | Runs ROS 2 Humble on Ubuntu 22.04. Robot-side relay. |
-| MLX90640 thermal camera | 1 | **I2C → arm-PCB ESP32** | 32×24 thermal array. Read by the **arm ESP32** (low-priority task, ~4 Hz), quantised + sent over UART; `esp32_bridge` republishes `/sensors/thermal`. |
-| LIS3MDL magnetometer | 1 | **I2C → arm-PCB ESP32** | Heading reference. Read by the **arm ESP32** (50 Hz), sent over UART; `esp32_bridge` republishes `/sensors/mag`. |
+| MLX90640 thermal camera | 1 | **I2C → sensor ESP32** | 32×24 thermal array. Read by the **sensor ESP32** (~4 Hz), quantised + sent over UART; `esp32_bridge` republishes `/sensors/thermal`. Always-on. |
+| GY-271 (QMC5883L) magnetometer | 1 | **I2C → sensor ESP32** | Heading reference (HW-246 breakout, QMC5883L clone at I2C `0x0D` — not a genuine HMC5883L). Read at 50 Hz, sent over UART; `esp32_bridge` republishes `/sensors/mag`. Always-on. |
 | ZED2 stereo camera | 1 | USB → Jetson | Visual-inertial odometry **and the robot's orientation/IMU source** (replaces the dropped BNO055). Feeds the planned odometry EKF + future SLAM/nav. |
 | RPLidar A2M12 | 1 | USB → Jetson | 2D lidar for **future** SLAM/nav. |
 | RF (FPV) camera | 2 | 5.8 GHz RF → USB digitizer → **workstation** | Appear as `/dev/videoN` webcams. **Driving** feed (low-latency, low-res). |
@@ -182,16 +183,17 @@ topic by `esp32_bridge`). Rationale + tuning:
 
 **Buses summary**
 
-- **Chassis ESP32 I2C**: unused in the normal robot build; the passive sensors live on the *arm* PCB.
-- **Arm ESP32 I2C** (`SDA=GPIO21`, `SCL=GPIO22`, 400 kHz): **MLX90640** thermal camera (0x33) + **LIS3MDL** magnetometer. Read by the arm ESP32 in low-priority tasks that never touch the CAN bus.
+- **Chassis/arm ESP32 I2C**: unused; the passive sensors live on the dedicated *sensor* ESP32.
+- **Sensor ESP32 I2C** (`SDA=GPIO22`, `SCL=GPIO21`, 400 kHz): **MLX90640** thermal camera (0x33) + **QMC5883L** magnetometer (0x0D). Read continuously by the sensor ESP32; the board does nothing else.
 - **Chassis ESP32 CAN** via an **on-board SMD MCP2515** over SPI
   (`CS=GPIO5`, `SCK=GPIO18`, `MISO=GPIO19`, `MOSI=GPIO23`, 8 MHz crystal),
   **500 kbps**: the 6 VESCs only (2 traction + 4 flippers).
 - **Arm ESP32 CAN** via the same MCP2515 hardware, **500 kbps**: 3 ODrives +
   1 ZE300 + 2 LKTech. The two PCBs do **not** share one CAN bus.
-- **ESP32 PCBs ⇄ Jetson**: two USB serial links, **921600 baud**, binary framed
-  protocol with board identity (§9).
-- **Jetson I2C (GPIO)**: unused — the thermal camera + magnetometer moved to the arm PCB.
+- **ESP32 boards ⇄ Jetson**: three USB serial links (chassis PCB, arm PCB,
+  sensor DevKit), **921600 baud**, binary framed protocol with board identity
+  (§9) — the bridge auto-binds each link by the role its firmware announces.
+- **Jetson I2C (GPIO)**: unused — the thermal camera + magnetometer live on the sensor ESP32.
 - **Jetson USB**: ZED2, RPLidar A2M12, **2× Logitech C920** (H.264 + Opus → SRT).
 - **Workstation USB**: 2× RF-camera digitizers.
 
@@ -202,25 +204,25 @@ topic by `esp32_bridge`). Rationale + tuning:
 
 ## 5. Compute domains: what runs where
 
-| Process / responsibility | Chassis ESP32 | Arm ESP32 | Jetson | Workstation |
-|--------------------------|:------------:|:---------:|:------:|:-----------:|
-| RC/PPM decode, mode FSM, e-stop | ✅ | | | |
-| Traction differential mixing → VESC RPM | ✅ | | | |
-| Flipper stick → target angle (loop closed on the VESC) | ✅ | | | |
-| Arm CAN relay (ODrive/ZE300/LKTech) | | ✅ | | |
-| LIS3MDL magnetometer read (I2C) | | ✅ | | |
-| MLX90640 thermal read + quantise (I2C, low-prio) | | ✅ | | |
-| Binary UART telemetry/commands | ✅ | ✅ | | |
-| Serial ⇄ ROS 2 bridge (`esp32_bridge`) | | | ✅ | |
-| Thermal/mag UART → `/sensors/thermal` + `/sensors/mag` | | | ✅ | |
-| C920 H.264 + Opus → SRT (GStreamer streamer) | | | ✅ | |
-| ZED2 + RPLidar drivers (future SLAM) | | | ✅ | |
-| Operator GUI (Qt6) | | | | ✅ |
-| C920 A/V SRT receive + speech (Vosk) | | | | ✅ |
-| Computer vision (YOLO hazmat) on the C920 streams | | | | ✅ |
-| MoveIt Servo + arm IK | | | | ✅ |
-| Gamepad → arm twist mapping (`joystick_servo`) | | | | ✅ |
-| Holds the RC transmitter | | | | 👤 |
+| Process / responsibility | Chassis ESP32 | Arm ESP32 | Sensor ESP32 | Jetson | Workstation |
+|--------------------------|:------------:|:---------:|:------------:|:------:|:-----------:|
+| RC/PPM decode, mode FSM, e-stop | ✅ | | | | |
+| Traction differential mixing → VESC RPM | ✅ | | | | |
+| Flipper stick → target angle (loop closed on the VESC) | ✅ | | | | |
+| Arm CAN relay (ODrive/ZE300/LKTech) | | ✅ | | | |
+| QMC5883L magnetometer read (I2C, always-on) | | | ✅ | | |
+| MLX90640 thermal read + quantise (I2C, always-on) | | | ✅ | | |
+| Binary UART telemetry/commands | ✅ | ✅ | ✅ | | |
+| Serial ⇄ ROS 2 bridge (`esp32_bridge`) | | | | ✅ | |
+| Thermal/mag UART → `/sensors/thermal` + `/sensors/mag` | | | | ✅ | |
+| C920 H.264 + Opus → SRT (GStreamer streamer) | | | | ✅ | |
+| ZED2 + RPLidar drivers (future SLAM) | | | | ✅ | |
+| Operator GUI (Qt6) | | | | | ✅ |
+| C920 A/V SRT receive + speech (Vosk) | | | | | ✅ |
+| Computer vision (YOLO hazmat) on the C920 streams | | | | | ✅ |
+| MoveIt Servo + arm IK | | | | | ✅ |
+| Gamepad → arm twist mapping (`joystick_servo`) | | | | | ✅ |
+| Holds the RC transmitter | | | | | 👤 |
 
 **Why the arm runs on the workstation:** the Jetson is intentionally a thin
 relay. The arm joint commands are computed on the workstation from the gamepad/
@@ -267,7 +269,7 @@ below are planned:
 | Package | Lang | Runs on | Purpose |
 |---------|------|---------|---------|
 | `rescue_interfaces` | msg/srv | both | Shared custom message & service definitions. **(arm saved-pose services: SavePose/GoToPose/DeletePose/ListPoses; named-map services: SaveMap/ListMaps/LoadMap/DeleteMap)** |
-| `esp32_bridge` | Python | Jetson | Serial binary protocol ⇄ ROS 2 topics. The relay core; also decodes the **arm-PCB** thermal/mag UART frames → `/sensors/thermal` (`Image`) + `/sensors/mag` (`MagneticField`) and relays `/sensors/enable_mask` down. **(implemented)** |
+| `esp32_bridge` | Python | Jetson | Serial binary protocol ⇄ ROS 2 topics. The relay core; also decodes the **sensor-ESP32** thermal/mag UART frames → `/sensors/thermal` (`Image`) + `/sensors/mag` (`MagneticField`), always-on (no enable mask). **(implemented)** |
 | `mlx90640_msgs` | msg | both | `ThermalStatus` diagnostics msg published alongside `/sensors/thermal`. **(implemented)** |
 | `dicerox_mapping` | mixed | Jetson | 2D SLAM: `slam_toolbox` + ZED2 planar odom (`zed_planar_odom`) + RPLidar scan reframer (`scan_frame_republisher`). Map save + localization. **(implemented)** |
 | `rescue_nav` | Python | Jetson/WS | **Navigation layer on top of `dicerox_mapping`**: Nav2 (planner + RegulatedPurePursuit + costmaps + waypoint follower), `robot_localization` **EKF** with adaptive covariance, a Gazebo *Classic* sim, the `waypoint_runner`, and the `/cmd_vel`→traction path. Real-robot workflows in `docs/COMPETITION_WORKFLOWS.md`. **(implemented — 2D autonomy PoC)** |
@@ -286,9 +288,10 @@ below are planned:
 ## 7. Firmware (ESP32)
 
 PlatformIO project targeting a DOIT ESP32 DevKit V1 (Arduino framework, both
-cores at 240 MHz). The same firmware runs on both identical PCBs; the only
-intended per-board build difference is `ROBOCOREA_BOARD_ROLE` in `config.h`
-(`CHASSIS` by default, or `ARM` for the arm PCB).
+cores at 240 MHz). The same firmware runs on all three boards — the two identical
+custom PCBs plus the bare sensor DevKit; the only intended per-board build
+difference is `ROBOCOREA_BOARD_ROLE` in `config.h` (`CHASSIS` by default, `ARM`
+for the arm PCB, or `SENSOR` for the sensor DevKit).
 
 ### 7.1 Module structure
 
@@ -307,6 +310,7 @@ firmware/
       Locomotion/       # Differential mixing + flipper target angle / hold → VESC
       CANInterface/     # CAN HAL (MCP2515 active / TWAI optional); gated by board role
       Comms/            # Binary UART protocol TX/RX
+      Sensors/          # QMC5883L mag + MLX90640 thermal (I2C); SENSOR role only (§7.4)
       Gripper/          # End-effector servo (LEDC PWM, GPIO26); ARM role only (§13.4)
       PID/              # Reusable PID (shortest-angle + D low-pass) — spare; flippers loop on the VESC
       Debug/            # Optional serial debug (mutually aware of ENABLE_COMMS)
@@ -323,24 +327,24 @@ firmware/
 
 ### 7.2 FreeRTOS tasks
 
-Role-gated tasks across the two cores. The **arm** board adds two low-priority
-sensor tasks for the I2C victim-detection sensors; the chassis has none.
+Role-gated tasks across the two cores. The chassis/arm PCBs run the control +
+CAN + comms trio; the **sensor** DevKit runs only comms plus its two I2C sensor
+tasks (it has no CAN transceiver and nothing to control).
 
 | Core | Task | Role | Rate | Priority | Purpose |
 |------|------|------|------|----------|---------|
-| 0 | `commsTask` | both | 50 Hz | 4 | UART RX parse + identity + role-owned telemetry |
-| 0 | `canTask` | both | 200 Hz | 4 | CAN poll; chassis parses VESCs, arm parses/polls ODrive/ZE300/LKTech |
-| 1 | `controlTask` | both | 50 Hz | 5 (highest) | Chassis: RC/base FSM; arm: relay latest joint command when armed |
-| 1 | `sensorTask` | **arm** | 50 Hz | 2 | LIS3MDL read → `MSG_SENSOR_MAG` |
-| 1 | `thermalTask` | **arm** | ~4 Hz | 1 (lowest) | MLX90640 `getFrame()` (blocks ~250 ms) → quantise → `MSG_SENSOR_THERMAL` |
+| 0 | `commsTask` | all | 50 Hz | 4 | UART RX parse + identity + role-owned telemetry |
+| 0 | `canTask` | chassis/arm | 200 Hz | 4 | CAN poll; chassis parses VESCs, arm parses/polls ODrive/ZE300/LKTech |
+| 1 | `controlTask` | chassis/arm | 50 Hz | 5 (highest) | Chassis: RC/base FSM; arm: relay latest joint command when armed |
+| 1 | `sensorTask` | **sensor** | 50 Hz | 2 | QMC5883L read → `MSG_SENSOR_MAG` |
+| 1 | `thermalTask` | **sensor** | ~4 Hz | 1 (lowest) | MLX90640 `getFrame()` (blocks ~250 ms) → quantise → `MSG_SENSOR_THERMAL` |
 
 `controlTask` uses `vTaskDelayUntil` for a strict, drift-free period. The
-control loop target is **50 Hz**. **The arm always wins:** `sensorTask`/
-`thermalTask` sit *below* control on core 1 and never run on core 0, so the heavy
-MLX float compute only consumes core-1 idle time and is preempted the instant
-control is ready; they touch only I2C (never the CAN bus). An internal I2C mutex
-serialises the shared bus between the two — a mag read mid-thermal-frame is
-skipped, not blocked. Both forward through the existing `Comms` TX mutex.
+control loop target is **50 Hz**. On the sensor board the thermal task sits at
+the lowest priority so the heavy MLX float compute never starves the 50 Hz mag
+reads or the UART TX. An internal I2C mutex serialises the shared bus between
+the two sensor tasks — a mag read mid-thermal-frame is skipped, not blocked.
+Both forward through the existing `Comms` TX mutex.
 
 ### 7.3 Locomotion
 
@@ -371,16 +375,24 @@ skipped, not blocked. Both forward through the existing `Comms` TX mutex.
   - The PD gains and the angle scale (`deg-per-dist`) live **in the lisp**, not
     `config.h`. *Verifying that scale 1:1 is the key bench task (§18).*
 
-### 7.4 Sensors (ARM PCB)
+### 7.4 Sensors (SENSOR ESP32)
 
-Both passive victim-detection sensors live on the **arm PCB's I2C bus** (`Sensors`
-module + the two tasks in §7.2). They moved off the Jetson I2C, which proved
-unreliable; the arm ESP32 reads them and forwards them over the UART link, and
-`esp32_bridge` republishes the same `/sensors/*` topics so the GUI is unchanged.
+Both passive victim-detection sensors live on the dedicated **sensor ESP32's I2C
+bus** (`Sensors` module + the two tasks in §7.2) — a bare DOIT DevKit V1 whose
+only job is reading them. They moved off the arm PCB (so the arm firmware carries
+no sensor work at all), and off the Jetson I2C before that, which proved
+unreliable. The sensor ESP32 reads them **continuously from boot** and forwards
+them over its own UART link; the bridge auto-binds the board by its
+`MSG_BOARD_IDENTITY` (role `SENSOR`) and republishes the same `/sensors/*`
+topics so the GUI is unchanged.
 
-- **Magnetometer (LIS3MDL).** Read at 50 Hz; XYZ sent as `MSG_SENSOR_MAG` (3×
-  `int16` µT). 16-gauss range to avoid saturating near the BLDC motors. Only a
-  *heading reference* — the robot's orientation comes from the ZED2.
+- **Magnetometer (QMC5883L on a GY-271/HW-246 breakout).** The breakout is sold
+  as "HMC5883L" but carries the QMC5883L clone at I2C `0x0D` (a genuine HMC sits
+  at `0x1E` and will not answer) — the firmware uses a tiny raw-register driver
+  (no library). Read at 50 Hz; XYZ sent as `MSG_SENSOR_MAG` (3× `int16` µT).
+  ±8 G range (the QMC's max, same motivation as the old LIS3MDL's 16 G: don't
+  saturate near the BLDC motors). Only a *heading reference* — the robot's
+  orientation comes from the ZED2.
 - **Thermal camera (MLX90640).** 32×24 °C frame at **~4 Hz** (8 Hz sub-page
   refresh; a full frame is half that). The °C frame is **quantised to 8 bits/
   pixel across each frame's own min/max** (both `int16 ×100 °C` sent in the
@@ -388,15 +400,15 @@ unreliable; the arm ESP32 reads them and forwards them over the UART link, and
   — ~776 bytes, one UART frame, ~6 KB/s at 4 Hz. The bridge dequantises to a
   32×24 `32FC1` `Image` on `/sensors/thermal` (+`_raw`, +`/sensors/thermal_status`
   with min/max/center/hotspot). The rate + I2C clock are tunable in `config.h`
-  (`THERMAL_REFRESH_RATE`, `SENSOR_I2C_HZ`); drop the rate to give the arm more
-  CPU headroom. *Priority:* the arm comes first — see §7.2.
+  (`THERMAL_REFRESH_RATE`, `SENSOR_I2C_HZ`).
 - **No IMU on the ESP32.** The BNO055 was removed; orientation/IMU comes from the
-  **ZED2** (visual-inertial). The IMU message type (`0x06`) and its enable bit are
-  kept **reserved-unused** so the protocol numbering stays stable.
-- **Enable mask.** The GUI's `/sensors/enable_mask` (bit0 = mag, bit1 = thermal)
-  is forwarded by the bridge to the arm as `MSG_SENSOR_ENABLE`; `Sensors` gates
-  each sensor so a disabled one never touches the I2C bus. The bridge re-sends the
-  last mask whenever the arm PCB (re)connects.
+  **ZED2** (visual-inertial). The IMU message type (`0x06`) is kept
+  **reserved-unused** so the protocol numbering stays stable.
+- **Always-on — no enable mask.** The old `/sensors/enable_mask` →
+  `MSG_SENSOR_ENABLE` path is gone: both sensors acquire and publish from boot,
+  unconditionally. The GUI's mag/thermal toggles are **display-only** (show/hide
+  the readout or the thermal video source); `MSG_SENSOR_ENABLE` (`0x11`) stays
+  reserved so the numbering is stable.
 
 ---
 
@@ -485,9 +497,11 @@ bus-off / fault recovery and a cross-core SPI mutex for the MCP2515 path.
 
 ## 9. ESP32 ⇄ Jetson binary UART protocol
 
-Two USB serial links, **921600 baud** each. Plain binary framing (no micro-ROS).
-Both ESP32s periodically send `MSG_BOARD_IDENTITY`, so the Jetson can dynamically
-bind whichever `/dev/serial/...` path is the chassis PCB or arm PCB.
+Three USB serial links (chassis PCB, arm PCB, sensor DevKit), **921600 baud**
+each. Plain binary framing (no micro-ROS). Every ESP32 periodically sends
+`MSG_BOARD_IDENTITY`, so the Jetson can dynamically bind whichever
+`/dev/serial/...` path is which board — plugging the sensor DevKit into any USB
+port is enough; the bridge auto-detects it.
 
 **Frame:** `[0xAA][0x55][TYPE:1][LEN_H:1][LEN_L:1][PAYLOAD:LEN][CRC:1]`
 **CRC** = XOR of `TYPE`, `LEN_H`, `LEN_L`, and every payload byte.
@@ -500,8 +514,8 @@ firmware (`robot_types.h`) and the bridge (Python `struct`).
 | Type | Name | Payload (summary) |
 |------|------|-------------------|
 | 0x01 | Telemetry | mode, flags, raw PPM[6], speed_l/r (eRPM-derived ×10), flipper angle ×10, uptime |
-| 0x02 | Thermal | **arm PCB:** seq, min/max °C ×100, cols/rows, 768 quantised px (~4 Hz) |
-| 0x03 | Magnetometer | **arm PCB:** LIS3MDL XYZ, 3× int16 µT (50 Hz) |
+| 0x02 | Thermal | **sensor ESP32:** seq, min/max °C ×100, cols/rows, 768 quantised px (~4 Hz) |
+| 0x03 | Magnetometer | **sensor ESP32:** QMC5883L XYZ, 3× int16 µT (50 Hz) |
 | 0x05 | Status | mode, flags, sensor mask |
 | 0x07 | Encoder ext | 4 flipper angles ×10 (FL, FR, RL, RR) |
 | 0x08 | VESC status | per-VESC: id, eRPM, current, duty, FET/motor temp, V_in, **tachometer** |
@@ -513,7 +527,7 @@ firmware (`robot_types.h`) and the bridge (Python `struct`).
 | 0x0F | Board identity | role, protocol version, capability bitmask |
 
 > **0x02 Thermal** and **0x03 Magnetometer** are back (same type numbers as
-> legacy), but now sent by the **arm PCB** and republished by `esp32_bridge`
+> legacy), but now sent by the **sensor ESP32** and republished by `esp32_bridge`
 > rather than read on the Jetson. Still removed: **0x04 Gas** (sensor dropped),
 > **0x06 IMU** (BNO055 removed — orientation from the ZED2), **0x09 Motor-main**
 > (was `ROBOT_MAIN`-only PWM duties — N/A here); their type numbers stay reserved
@@ -524,7 +538,7 @@ firmware (`robot_types.h`) and the bridge (Python `struct`).
 | Type | Name | Payload |
 |------|------|---------|
 | 0x10 | Arm joints | 6 × int16 (deg ×100) — computed on the workstation |
-| 0x11 | Sensor enable | **arm PCB:** 1-byte mask (bit0 mag, bit1 thermal) — from `/sensors/enable_mask` |
+| 0x11 | *(reserved)* | was the sensor enable mask — the sensor ESP32 is always-on now; the GUI toggles are display-only |
 | 0x12 | E-stop | (empty) — immediate stop |
 | 0x13 | E-stop clear | (empty) — resume |
 | 0x14 | *(reserved)* | was Keybind — the RC uses a fixed control scheme now (§13.2) |
@@ -535,11 +549,10 @@ firmware (`robot_types.h`) and the bridge (Python `struct`).
 (0x17–0x19 are the arm lifecycle commands: init / disarm / mode.)
 
 The bridge translates each of these to/from ROS 2 topics (§12) and routes
-outbound frames by role: arm joints/lifecycle commands **and the sensor-enable
-mask** go to the arm PCB; PPM calibration and the traction command go to the
-chassis PCB; software e-stop is sent to all discovered ESP32 links. The
-sensor-enable mask (`/sensors/enable_mask`) is forwarded to the arm as
-`MSG_SENSOR_ENABLE` and re-sent whenever the arm link (re)identifies.
+outbound frames by role: arm joints/lifecycle commands go to the arm PCB; PPM
+calibration and the traction command go to the chassis PCB; software e-stop is
+sent to all discovered ESP32 links. The sensor ESP32 accepts no commands — its
+sensors are always-on.
 
 **Traction command (0x1A) — the autonomy drive path.** The base is normally
 RC-only; this is the one way ROS can drive the tracks. The Jetson bridge converts
@@ -577,13 +590,13 @@ hardware and the operator network. Planned nodes:
   VESCs' tachometers into track wheel odometry**, published as
   `nav_msgs/Odometry` on `/odom/wheel` (with skid-steer covariances; **no TF** —
   the EKF owns `odom→base_link`). Wheel/track geometry is set via node
-  parameters. **It now also owns the passive sensors:** it decodes the arm PCB's
-  `MSG_SENSOR_THERMAL` / `MSG_SENSOR_MAG` frames, dequantises the thermal frame to
-  a 32×24 `sensor_msgs/Image` on `/sensors/thermal` (+`_raw`, +`/sensors/thermal_
-  status` `ThermalStatus`) and publishes `/sensors/mag` (`sensor_msgs/Magnetic
-  Field`), and relays `/sensors/enable_mask` (bit0 mag, bit1 thermal) down as
-  `MSG_SENSOR_ENABLE`. *(There is no longer a separate `jetson_sensors` package —
-  the Jetson I2C path was removed.)*
+  parameters. **It now also owns the passive sensors:** it decodes the sensor
+  ESP32's `MSG_SENSOR_THERMAL` / `MSG_SENSOR_MAG` frames, dequantises the thermal
+  frame to a 32×24 `sensor_msgs/Image` on `/sensors/thermal` (+`_raw`,
+  +`/sensors/thermal_status` `ThermalStatus`) and publishes `/sensors/mag`
+  (`sensor_msgs/MagneticField`). The sensors are always-on — there is no enable
+  mask. *(There is no longer a separate `jetson_sensors` package — the Jetson I2C
+  path was removed.)*
 - **`camera_streamer`** *(implemented, `rescue_bringup camera_streamer`,
   `camera-streamer.service`)*. Auto-detects **every** USB UVC camera (a GStreamer
   pipeline per camera, video-only H.264/MPEG-TS over **SRT** to the GUI), gives the
@@ -687,9 +700,9 @@ both are visible at once under the twin.)
 | `VideoPanel` / `VideoWidget` | 2×2 grid of feeds; click-to-enlarge; each widget runs its own filter pipeline on a worker thread and can select any source (incl. thermal). An enlarged cell supports **zoom + pan** (on-screen +/−/Fit buttons or Ctrl+scroll to zoom — trackpad pinch only on Wayland, not X11; two-finger scroll / drag to pan), applied as an ROI crop+upscale of the source frame **before** the filter pipeline (so the CV runs on the zoomed region); resets to fit on collapse. |
 | `FilterRegistry` / `filters` | Self-registering CV filters with a thread-safe `FilterConfig` (atomics). Per-widget instances. |
 | `OdometryPanel` | Track speeds, **track wheel-odometry (x/y/yaw/vx from `/odom/wheel`)**, 4 flipper angles, **per-VESC rows (the six VESC IDs)**, and arm telemetry (ODrive/LKTech/ZE300). |
-| `DashboardPanel` | The always-on operator strip: connection LED + heartbeat + uptime + **6S-LiPo pack-voltage readout (color-coded per-cell, from any VESC `V_in`)**, magnetometer readout (+ enable toggle), **thermal-acquisition enable toggle**, **orientation readout from the ZED2 IMU**, **e-stop button**, an **AUTO DRIVE toggle** (autonomy `/cmd_vel` allow/prevent, reflecting `/autonomy/state`; §16), **arm arm/disarm + dexterity/chassis controls**, audio toggle, and the **⚙ settings** + **⊞ Robot Systems** toolbar buttons. (The perception/mapping **stack** controls moved out to `SystemsWindow` to declutter it.) |
+| `DashboardPanel` | The always-on operator strip: connection LED + heartbeat + uptime + **6S-LiPo pack-voltage readout (color-coded per-cell, from any VESC `V_in`)**, magnetometer readout (+ display-only show/hide toggle), **thermal-display toggle (display-only — the sensor ESP32 always publishes; ON shows thermal in a free video cell, OFF deselects it everywhere)**, **orientation readout from the ZED2 IMU**, **e-stop button**, an **AUTO DRIVE toggle** (autonomy `/cmd_vel` allow/prevent, reflecting `/autonomy/state`; §16), **arm arm/disarm + dexterity/chassis controls**, audio toggle, and the **⚙ settings** + **⊞ Robot Systems** toolbar buttons. (The perception/mapping **stack** controls moved out to `SystemsWindow` to declutter it.) |
 | `SystemsWindow` | Top-level **"Robot Systems"** window (⊞ icon next to ⚙), created eagerly+hidden so its clients/subs stay live and a running routine survives the window being closed. A `QTabWidget`: **Perception** (`PerceptionPanel`), **Maps** (`MapsPanel`), **Arm Program** (`RoutineProgrammer`). Owns `stopAllStacks()` (called from `MainWindow::closeEvent`). |
-| `PerceptionPanel` | The robot_manager stacks — **sensors / mapping / mapping3d / localization** — each a start/stop + live LED from `/robot/<stack>/status`, plus **Open 2D/3D Map** (→ `MapWindow`). Moved out of the dashboard. (No I2C stack — thermal/mag are on the arm PCB; their enable toggles stay on the dashboard.) |
+| `PerceptionPanel` | The robot_manager stacks — **sensors / mapping / mapping3d / localization** — each a start/stop + live LED from `/robot/<stack>/status`, plus **Open 2D/3D Map** (→ `MapWindow`). Moved out of the dashboard. (No I2C stack — thermal/mag are on the sensor ESP32, always-on; their display-only toggles stay on the dashboard.) |
 | `MapsPanel` | The **named map library** (Maps tab): lists `/robot/maps/list` names with 2D/3D badges + preview thumbnails, **Load** (2D/3D/both → robot-side localization), **Delete**, **Refresh**. Map *data* is robot-owned (`map_manager`); thumbnails mirror to `~/.config/robocorea_gui/map_thumbs/` (like arm poses). |
 | `RoutineProgrammer` | **Block-programmed autonomous arm routines** (Arm Program tab): chain *Go-to-pose / Wait / Gripper open-close / Loop×N / Run-subroutine* blocks into named routines (auto-saved to `~/.config/robocorea_gui/arm_routines.json`). A Qt-thread interpreter (call stack for subroutines, per-frame loop counters) sequences poses on `/servo_node/go_to_pose` + `plan_state==reached`, dwells/gripper on a tick timer; **Start/Pause/Stop** + selectable top-level loop. Gripper steps publish `/gripper` (§13.4). |
 | `MapWindow` / `UrdfViewer` | Live 2-D `/map` or 3-D `/robot/map3d` view (robot at its `map→base` TF). Toolbar: **Set Start Pose** (2-D: click-drag on the map → `/initialpose`, click=X/Y, drag=yaw, roll/pitch 0) and **Save Map…** (grabs a preview thumbnail, calls `/robot/maps/save`). |
@@ -717,9 +730,9 @@ detection. Each cell runs its own filter instance with a thread-safe
 `rescue_vision` package can also run detection as a separate node; the in-GUI
 filter is the legacy path.
 
-**Topics:** publishes `/robot/ppm_calib` (reliable + transient-local),
-`/robot/estop` (Bool, republished ~10 Hz), and `/sensors/enable_mask` (UInt8:
-bit0 mag, bit1 thermal; imu bit reserved-unused).
+**Topics:** publishes `/robot/ppm_calib` (reliable + transient-local) and
+`/robot/estop` (Bool, republished ~10 Hz). (No `/sensors/enable_mask` — the
+sensors are always-on; the mag/thermal toggles are display-only.)
 Subscribes to the telemetry/sensor/motor/mode/flags topics from §12, plus
 `/odom/wheel` (track odometry), `/sensors/thermal`, the **ZED2 IMU** topic
 (orientation readout), and the latched **arm lifecycle** topics
@@ -774,10 +787,10 @@ links.
 | `/autonomy/state` | `Bool` (latched) | actual autonomy-drive state; goes false on a GUI disable **or** an RC override (§9.2/§16) |
 | `/motors/vesc_status` | `Float32MultiArray` | per-VESC telemetry (incl. tachometer) |
 | `/motors/odrive_status` | `Float32MultiArray` | per-arm-joint telemetry |
-| `/sensors/thermal` | `Image` | 32×24 float32 °C — decoded from the arm PCB's `MSG_SENSOR_THERMAL` |
+| `/sensors/thermal` | `Image` | 32×24 float32 °C — decoded from the sensor ESP32's `MSG_SENSOR_THERMAL` |
 | `/sensors/thermal_raw` | `Image` | same frame (no temporal filter applied) |
 | `/sensors/thermal_status` | `mlx90640_msgs/ThermalStatus` | seq, sensor_ok, min/max/center, hotspot, rate |
-| `/sensors/mag` | `MagneticField` | LIS3MDL XYZ (Tesla) — from the arm PCB's `MSG_SENSOR_MAG` |
+| `/sensors/mag` | `MagneticField` | QMC5883L XYZ (Tesla) — from the sensor ESP32's `MSG_SENSOR_MAG` |
 
 ### Subscribed by `esp32_bridge` (PC → robot)
 
@@ -789,12 +802,11 @@ links.
 | `/gripper` | `Float32` | gripper open/close **rate** (+open / −close), routed to the arm PCB as `MSG_GRIPPER` (§13.4) |
 | `/cmd_vel` | `geometry_msgs/Twist` | autonomy drive (Nav2); forwarded as `MSG_TRACTION_CMD` only while autonomy is enabled (§9.2) |
 | `/autonomy/enable` | `Bool` | operator request to allow/prevent `/cmd_vel` driving the tracks (from the GUI; volatile) |
-| `/sensors/enable_mask` | `UInt8` (latched) | bits: mag (0), thermal (1); relayed to the arm PCB as `MSG_SENSOR_ENABLE` |
 
 ### Published by `gui`
 
 `/robot/ppm_calib` (reliable + transient-local), `/robot/estop` (republished
-~10 Hz), `/sensors/enable_mask`, **`/autonomy/enable`** (`Bool`, the autonomy
+~10 Hz), **`/autonomy/enable`** (`Bool`, the autonomy
 allow/prevent toggle in the dashboard), **`/gripper`** (`Float32` rate, from the
 `RoutineProgrammer` gripper blocks; the gamepad also publishes it, §13.4), and
 **`/initialpose`** (`PoseWithCovarianceStamped`, map frame — from a click-drag on
@@ -1090,7 +1102,8 @@ pio device monitor # serial monitor
 Edit `include/config.h` for pins, CAN IDs, gear ratios, flipper params, and the
 single per-board role macro. Leave `ROBOCOREA_BOARD_ROLE` at
 `ROBOCOREA_BOARD_ROLE_CHASSIS` for the chassis PCB; set it to
-`ROBOCOREA_BOARD_ROLE_ARM` for the arm PCB before building/flashing that board.
+`ROBOCOREA_BOARD_ROLE_ARM` for the arm PCB or `ROBOCOREA_BOARD_ROLE_SENSOR` for
+the bare sensor DevKit before building/flashing that board.
 The flipper VESCs also need `firmware/VESC/flipper_position.lisp` flashed via
 VESC Tool (Scripting → LispBM, "Run at startup") — see `firmware/VESC/README.md`.
 
@@ -1112,7 +1125,7 @@ source install/setup.bash
 
 **On the Jetson** launch the relay + the C920 video/audio streamer. The thermal
 camera + magnetometer come up automatically with the bridge (they're read on the
-arm PCB and republished here — no separate sensor node):
+sensor ESP32, always-on, and republished here — no separate sensor node):
 ```bash
 ros2 launch esp32_bridge esp32_bridge.launch.py
 # Optional explicit bench override:
@@ -1141,7 +1154,7 @@ installs the systemd units, starts `esp32-bridge` + `robot-manager` +
 **`laptop.sh`** (workstation: `gui bringup.launch.py`). Both reconcile the Zenoh
 router + domain and take overrides (`--serial`, `--no-ekf`, `--domain`, …).
 **`diagnose.sh`** is the read-only hardware diagnostics dispatcher (PPM, CAN
-presence for the 6 VESCs + 6 arm joints, arm-PCB I2C sensors, comms/link health
+presence for the 6 VESCs + 6 arm joints, sensor-ESP32 I2C sensors, comms/link health
 — `esp32_bridge` `diag_*` nodes). The robot-side perception/maps systemd layer is
 in `rescue_bringup` (`robot_manager` + `map_manager` + `systemd/`); see its README
 and [`OPERATIONS.md`](../OPERATIONS.md).
@@ -1240,21 +1253,23 @@ Things that are **not yet pinned down** and must be resolved on real hardware:
     steps-per-erev; and tune the skid-steer covariances (forward `vx` trusted,
     yaw distrusted — heading comes from the ZED2 IMU).
 
-13. **Passive sensors on the arm PCB (built; bench-verify).** *Decided + built:*
-    the **MLX90640 thermal camera + LIS3MDL magnetometer** moved off the (flaky)
-    Jetson I2C onto the **arm PCB** I2C bus (`SDA=21, SCL=22`), read by two
-    low-priority arm-ESP32 tasks and forwarded over UART; `esp32_bridge`
-    republishes `/sensors/thermal` (+`_raw`,`_status`) + `/sensors/mag` and relays
-    `/sensors/enable_mask` down (§7.4, §9). Thermal is 8-bit-per-pixel quantised
-    across each frame's min/max at **~4 Hz** to stay tiny on the UART and cheap on
-    the arm CPU. **The arm is the priority:** sensor tasks sit below control/CAN
-    and never touch the CAN bus. **Bench items:** confirm both I2C addresses
-    (MLX `0x33`, LIS3MDL `0x1C`/`0x1E`) and that the bus is clean alongside the
-    arm wiring; watch that `thermalTask` doesn't measurably perturb the arm CAN
-    relay under load (if it does, drop `THERMAL_REFRESH_RATE` or, in the worst
-    case, move the sensors to the chassis PCB); raise `SENSOR_I2C_HZ` toward
-    1 MHz only if you push the refresh up; and sanity-check that the quantised
-    °C reconstructs faithfully in the GUI thermal overlay.
+13. **Passive sensors on a dedicated sensor ESP32 (built; bench-verify).**
+    *Decided + built:* the **MLX90640 thermal camera + GY-271 (QMC5883L)
+    magnetometer** live on a bare DevKit's I2C bus (`SDA=22, SCL=21`), read by
+    two tasks and forwarded over the board's own UART link — always-on, no
+    enable mask (the GUI toggles are display-only); `esp32_bridge` auto-binds
+    the board by identity (role `SENSOR`) and republishes `/sensors/thermal`
+    (+`_raw`,`_status`) + `/sensors/mag` (§7.4, §9). This freed the arm PCB of
+    all sensor work (it previously hosted them; the Jetson I2C before that was
+    flaky). Thermal is 8-bit-per-pixel quantised across each frame's min/max at
+    **~4 Hz** to stay tiny on the UART. **Bench items:** confirm both I2C
+    addresses answer (MLX `0x33`, QMC5883L `0x0D` — a GY-271 that answers at
+    `0x1E` is a genuine HMC5883L and needs a different driver); check the
+    DevKit's USB-UART chip so the bridge's serial glob matches (CH340 shows as
+    `/dev/ttyCH341USB*` on the Jetson; a CP2102 needs a udev symlink to avoid
+    racing the RPLidar); verify the µT scaling (±8 G ⇒ 30 LSB/µT) against a
+    known field; and sanity-check that the quantised °C reconstructs faithfully
+    in the GUI thermal overlay.
 
 ---
 

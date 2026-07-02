@@ -65,9 +65,13 @@ MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget* parent)
     connect(source_manager_, &SourceManager::sourcesUpdated,
             this, &MainWindow::onSourcesUpdated);
 
-    // Selecting a thermal source anywhere enables the thermal sensor bit.
+    // Thermal display sync (display-only — acquisition on the sensor ESP32 is
+    // always on): selecting a thermal source anywhere flips the dashboard toggle,
+    // and the toggle selects/deselects the thermal source in the video cells.
     connect(video_panel_, &VideoPanel::thermalActiveChanged,
             dashboard_panel_, &DashboardPanel::setThermalEnabled);
+    connect(dashboard_panel_, &DashboardPanel::thermalDisplayToggled,
+            video_panel_, &VideoPanel::setThermalDisplayed);
     connect(dashboard_panel_, &DashboardPanel::resetSourcesRequested,
             source_manager_, &SourceManager::discoverSources);
     connect(dashboard_panel_, &DashboardPanel::settingsRequested,

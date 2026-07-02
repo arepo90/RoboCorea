@@ -9,10 +9,10 @@
 //
 // controlTask runs the state machine (RC → mix / flipper-PID / arm-relay).
 // commsTask owns periodic telemetry/motor-status TX (and parses inbound frames).
-// canTask drains the CAN bus and emits ODrive telemetry RTRs. On the ARM board
-// two extra low-priority core-1 tasks read the I2C victim-detection sensors
-// (sensorTask = LIS3MDL magnetometer, thermalTask = MLX90640) and forward them —
-// they sit below control so they can never delay the arm CAN relay.
+// canTask drains the CAN bus and emits ODrive telemetry RTRs. The SENSOR board
+// (a bare DevKit — no CAN, no RC) instead runs only commsTask plus two core-1
+// tasks that read the I2C victim-detection sensors (sensorTask = QMC5883L
+// magnetometer, thermalTask = MLX90640) and forward them continuously.
 //
 // See reference/architecture.md and the firmware README for details.
 
@@ -28,6 +28,7 @@
 #include "Gripper.h"
 #include "Sensors.h"
 
+#if !ROBOCOREA_ROLE_IS_SENSOR
 // ─── Core 1: control state machine ────────────────────────────────────────────
 static void controlTask(void*) {
     const TickType_t period = pdMS_TO_TICKS(1000 / CONTROL_LOOP_HZ);
@@ -47,6 +48,7 @@ static void canTask(void*) {
         vTaskDelayUntil(&last, period);
     }
 }
+#endif
 
 // ─── Core 0: UART comms + telemetry ───────────────────────────────────────────
 // All UART transmission happens here (plus the occasional gripper frame from the
@@ -56,7 +58,9 @@ static void commsTask(void*) {
     TickType_t last = xTaskGetTickCount();
     uint32_t last_identity_ms = 0;
     bool identity_sent = false;
+#if !ROBOCOREA_ROLE_IS_SENSOR
     uint8_t status_div = 0;
+#endif
 
     for (;;) {
         Comms::tick();   // drain RX, dispatch callbacks
@@ -140,10 +144,11 @@ static void commsTask(void*) {
     }
 }
 
-#if ROBOCOREA_ROLE_IS_ARM
-// ─── Core 1: magnetometer (low priority, below control) ───────────────────────
-// LIS3MDL read + forward. The I2C bus is shared with the thermal task via a mutex
-// inside Sensors; a read mid-thermal-frame is skipped rather than blocking.
+#if ROBOCOREA_ROLE_IS_SENSOR
+// ─── Core 1: magnetometer ──────────────────────────────────────────────────────
+// QMC5883L read + forward, always on. The I2C bus is shared with the thermal
+// task via a mutex inside Sensors; a read mid-thermal-frame is skipped rather
+// than blocking.
 static void sensorTask(void*) {
     const TickType_t period = pdMS_TO_TICKS(1000 / SENSOR_MAG_HZ);
     TickType_t last = xTaskGetTickCount();
@@ -158,10 +163,10 @@ static void sensorTask(void*) {
 }
 
 // ─── Core 1: thermal camera (lowest priority) ─────────────────────────────────
-// MLX90640 getFrame() blocks ~250 ms; running it lowest-priority means the heavy
-// °C compute only soaks up core-1 idle time and is preempted instantly by the
-// control task. Each successful frame is quantised + shipped (TX mutex inside
-// Comms). The hardware refresh paces this to ~4 Hz, so no extra rate-limit.
+// MLX90640 getFrame() blocks ~250 ms; running it lowest-priority keeps the heavy
+// °C compute from starving the mag task and the UART TX. Each successful frame
+// is quantised + shipped (TX mutex inside Comms). The hardware refresh paces
+// this to ~4 Hz, so no extra rate-limit.
 static void thermalTask(void*) {
     for (;;) {
         if (Sensors::runThermalOnce()) {
@@ -169,7 +174,7 @@ static void thermalTask(void*) {
             Sensors::getThermal(t);
             if (t.valid) Comms::sendThermalFrame(t);
         } else {
-            vTaskDelay(pdMS_TO_TICKS(100));   // disabled / not ready: back off
+            vTaskDelay(pdMS_TO_TICKS(100));   // sensor missing / not ready: back off
         }
     }
 }
@@ -177,13 +182,26 @@ static void thermalTask(void*) {
 
 void setup() {
     Comms::begin();          // UART + TX mutex
+
+#if ROBOCOREA_ROLE_IS_SENSOR
+    // Bare DevKit: no CAN transceiver, no RC, no gripper — only the I2C sensors
+    // and the UART link. Skipping CANInterface entirely also avoids its blocking
+    // MCP2515 bring-up against a chip that isn't there.
+    Sensors::begin();        // QMC5883L + MLX90640 on the sensor ESP32 I2C bus
+
+    xTaskCreatePinnedToCore(commsTask,   "comms",   STACK_COMMS,   nullptr,
+                            PRIO_COMMS,   nullptr, TASK_CORE_COMMS);
+    xTaskCreatePinnedToCore(sensorTask,  "sensor",  STACK_SENSOR,  nullptr,
+                            PRIO_SENSOR,  nullptr, TASK_CORE_SENSOR);
+    xTaskCreatePinnedToCore(thermalTask, "thermal", STACK_THERMAL, nullptr,
+                            PRIO_THERMAL, nullptr, TASK_CORE_SENSOR);
+#else
     CANInterface::begin();   // TWAI + arm controller bring-up (blocking)
 #if ROBOCOREA_ROLE_IS_CHASSIS
     Locomotion::begin();     // zero the drivetrain VESCs
 #endif
 #if ROBOCOREA_ROLE_IS_ARM
     Gripper::begin();        // LEDC end-effector servo on GPIO26; park at closed
-    Sensors::begin();        // LIS3MDL + MLX90640 on the arm PCB I2C bus
 #endif
     Control::begin();        // register callbacks, configure flipper PIDs
 #if ROBOCOREA_ROLE_IS_CHASSIS
@@ -196,11 +214,6 @@ void setup() {
                             PRIO_COMMS,   nullptr, TASK_CORE_COMMS);
     xTaskCreatePinnedToCore(canTask,     "can",     STACK_CAN,     nullptr,
                             PRIO_CAN,     nullptr, TASK_CORE_CAN);
-#if ROBOCOREA_ROLE_IS_ARM
-    xTaskCreatePinnedToCore(sensorTask,  "sensor",  STACK_SENSOR,  nullptr,
-                            PRIO_SENSOR,  nullptr, TASK_CORE_SENSOR);
-    xTaskCreatePinnedToCore(thermalTask, "thermal", STACK_THERMAL, nullptr,
-                            PRIO_THERMAL, nullptr, TASK_CORE_SENSOR);
 #endif
 }
 

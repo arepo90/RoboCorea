@@ -12,7 +12,6 @@ uint8_t  Comms::s_rx_crc     = 0;
 uint32_t Comms::s_last_rx_ms = 0;
 
 ArmJointsCallback    Comms::s_cb_arm        = nullptr;
-SensorEnableCallback Comms::s_cb_sensor     = nullptr;
 EstopCallback        Comms::s_cb_estop      = nullptr;
 PpmCalibCallback     Comms::s_cb_ppm_calib  = nullptr;
 ArmLifecycleCallback Comms::s_cb_arm_life   = nullptr;
@@ -80,9 +79,8 @@ void Comms::processFrame(uint8_t type, const uint8_t* buf, uint16_t len) {
                 ArmJointsPayload p; memcpy(&p, buf, sizeof(p)); s_cb_arm(p);
             }
             break;
-        case MSG_SENSOR_ENABLE:
-            if (len == sizeof(SensorEnablePayload) && s_cb_sensor) s_cb_sensor(buf[0]);
-            break;
+        // MSG_SENSOR_ENABLE (0x11) is reserved-unused — the SENSOR ESP32's
+        // sensors are always-on now; the GUI toggles are display-only.
         case MSG_ESTOP:
             if (s_cb_estop) s_cb_estop(true);
             break;

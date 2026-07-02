@@ -111,6 +111,8 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
         auto* mag_hdr = new QLabel("Magnetometer (µT)", this);
         mag_hdr->setStyleSheet(hdr_style);
         mag_toggle_ = make_sensor_toggle();
+        mag_toggle_->setToolTip("Show the magnetometer readout/graph. The sensor "
+                                "itself always publishes (sensor ESP32).");
         connect(mag_toggle_, &QPushButton::toggled, this, &DashboardPanel::onSensorToggled);
         mag_hdr_row->addWidget(mag_hdr, 1);
         mag_hdr_row->addWidget(mag_toggle_);
@@ -147,19 +149,20 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     mag_tabs_->addTab(mag_plot_, "Graph");
     layout->addWidget(mag_tabs_);
 
-    // ── Thermal acquisition enable ────────────────────────────────────────────
-    // The dashboard owns /sensors/enable_mask (bit0 mag, bit1 thermal). The
-    // sensors live on the arm PCB now (read by the arm ESP32); esp32_bridge
-    // forwards this mask down as MSG_SENSOR_ENABLE. The mask is latched, so the
-    // bridge re-applies the operator's choice whenever the arm PCB reconnects.
+    // ── Thermal display toggle ────────────────────────────────────────────────
+    // Display-only: the thermal camera lives on the sensor ESP32 and always
+    // publishes. ON shows the thermal source in a free video cell; OFF deselects
+    // it from every cell. Selecting/deselecting a thermal source in the video
+    // panel drives this toggle too, so it mirrors what's on screen.
     {
         auto* row = new QHBoxLayout();
         row->setSpacing(4);
-        auto* thermal_lbl = new QLabel("Thermal acquisition", this);
+        auto* thermal_lbl = new QLabel("Thermal display", this);
         thermal_lbl->setStyleSheet(lbl_style);
         thermal_toggle_ = make_sensor_toggle();
-        thermal_toggle_->setToolTip("Enable thermal acquisition (enable_mask bit 1). "
-                                    "Also auto-enabled when the thermal video source is selected.");
+        thermal_toggle_->setToolTip("Show the thermal camera in the video grid "
+                                    "(acquisition is always on). ON picks a free "
+                                    "cell; OFF deselects thermal everywhere.");
         connect(thermal_toggle_, &QPushButton::toggled, this, &DashboardPanel::onThermalToggled);
         row->addWidget(thermal_lbl, 1);
         row->addWidget(thermal_toggle_);
@@ -312,13 +315,6 @@ DashboardPanel::DashboardPanel(rclcpp::Node::SharedPtr node, QWidget* parent)
     heartbeat_timer_->setInterval(1000);
     connect(heartbeat_timer_, &QTimer::timeout, this, &DashboardPanel::onHeartbeatCheck);
     heartbeat_timer_->start();
-
-    // Latched (transient_local) so esp32_bridge picks up the last enable choice
-    // when it (re)starts and relays it to the arm PCB. Must match the bridge
-    // subscription's durability.
-    sensor_mask_pub_ = node_->create_publisher<std_msgs::msg::UInt8>(
-        "/sensors/enable_mask", rclcpp::QoS(10).reliable().transient_local());
-    publishSensorMask();  // start with all sensors off
 
     layout->addStretch();
     add_hsep();
@@ -547,19 +543,6 @@ void DashboardPanel::setConnState(const QString& color, const QString& label)
     conn_label_->setText(label);
 }
 
-void DashboardPanel::publishSensorMask()
-{
-    // The enable toggles are the single source of truth: bit0 = mag, bit1 = thermal.
-    // (Both toggles may not exist yet during early construction — treat as off.)
-    uint8_t m = 0;
-    if (mag_toggle_ && mag_toggle_->isChecked())         m |= static_cast<uint8_t>(1 << 0);
-    if (thermal_toggle_ && thermal_toggle_->isChecked()) m |= static_cast<uint8_t>(1 << 1);
-    sensor_mask_ = m;
-    std_msgs::msg::UInt8 msg;
-    msg.data = sensor_mask_;
-    sensor_mask_pub_->publish(msg);
-}
-
 void DashboardPanel::onTelemetryReceived()
 {
     hb_received_ = true;
@@ -626,26 +609,34 @@ void DashboardPanel::onHeartbeatCheck()
 
 void DashboardPanel::onSensorToggled()
 {
+    // Display-only: the magnetometer always publishes; off just stops updating
+    // the readout (dashes) and pauses the strip chart.
     mag_toggle_->setText(mag_toggle_->isChecked() ? "ON" : "OFF");
-    publishSensorMask();   // recomputes the full mask from both toggles
+    if (!mag_toggle_->isChecked()) {
+        mag_x_->setText("--");
+        mag_y_->setText("--");
+        mag_z_->setText("--");
+    }
 }
 
 void DashboardPanel::onThermalToggled()
 {
+    // Display-only: acquisition is always on. ON re-scans sources (so the topic
+    // shows up without a manual "Reset Sources") and asks the video panel to put
+    // thermal in a free cell; OFF deselects it from every cell.
     thermal_toggle_->setText(thermal_toggle_->isChecked() ? "ON" : "OFF");
-    publishSensorMask();
-    // Enabling thermal makes the robot publish /sensors/thermal; re-scan sources so
-    // it shows up as a selectable video source without a manual "Reset Sources".
-    // (Source discovery preserves each cell's current selection, so this is safe.)
-    if (thermal_toggle_ && thermal_toggle_->isChecked())
+    if (thermal_toggle_->isChecked())
         emit resetSourcesRequested();
+    emit thermalDisplayToggled(thermal_toggle_->isChecked());
 }
 
 void DashboardPanel::setThermalEnabled(bool enabled)
 {
-    // Called by the VideoPanel when the thermal source is selected/deselected;
-    // drive the thermal toggle so enable_mask bit1 has a single source of truth.
-    // setChecked emits toggled() -> onThermalToggled() -> publishSensorMask().
+    // Called by the VideoPanel when the thermal source is selected/deselected in
+    // any cell; drive the toggle so it mirrors what's actually on screen.
+    // setChecked emits toggled() -> onThermalToggled(); the resulting
+    // thermalDisplayToggled() round-trip is a no-op in the panel (already
+    // selected/deselected).
     if (thermal_toggle_)
         thermal_toggle_->setChecked(enabled);
 }
@@ -706,6 +697,8 @@ void DashboardPanel::onTranscriptionUpdated(const QString& text)
 
 void DashboardPanel::onMagnetometerUpdated(double x, double y, double z)
 {
+    // The sensor ESP32 publishes continuously; the toggle only gates display.
+    if (!mag_toggle_ || !mag_toggle_->isChecked()) return;
     mag_x_->setText(QString::number(x, 'f', 2));
     mag_y_->setText(QString::number(y, 'f', 2));
     mag_z_->setText(QString::number(z, 'f', 2));

@@ -28,7 +28,6 @@ public:
     static void triggerEstop();
     static void clearEstop();
     static void setArmJoints(const ArmJointsPayload& payload);
-    static void setSensorMask(uint8_t mask);
     // External (Nav2 /cmd_vel) traction command, normalised L/R track speed [-1,1].
     static void setExternalTraction(float left, float right, bool enable);
 
@@ -41,7 +40,6 @@ private:
 
     static RobotMode    s_mode;
     static ArmJoints    s_arm_joints;
-    static uint8_t      s_sensor_mask;
     static bool         s_hw_estop;       // Ch6-down RC e-stop
     static bool         s_virtual_estop;  // PC/comms e-stop
     static bool         s_virtual_flip;   // Ch6-up "drive from the other end"

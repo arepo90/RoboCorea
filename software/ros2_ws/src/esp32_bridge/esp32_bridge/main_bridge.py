@@ -1,15 +1,19 @@
 """
 RoboCorea ESP32 ⇄ ROS 2 bridge (Jetson side)
 =============================================
-Runs on the Jetson Orin Nano. Owns one or two USB-serial links to identical
-ESP32 PCBs and routes frames by the board identity announced by firmware:
+Runs on the Jetson Orin Nano. Owns up to three USB-serial links to ESP32
+boards running the same firmware and routes frames by the board identity
+announced by each one:
 
   * CHASSIS PCB: RC/PPM, traction, flippers, wheel odometry.
   * ARM PCB: arm lifecycle, joint commands, and mixed-CAN arm telemetry.
+  * SENSOR ESP32 (bare DevKit): MLX90640 thermal + QMC5883L magnetometer,
+    always-on — republished as /sensors/thermal + /sensors/mag.
 
 The public ROS API intentionally stays the same as the old one-PCB bridge:
 chassis data appears on /robot, /encoders, /odom, and /motors/vesc_*;
-arm data appears on /arm and the arm motor topics.
+arm data appears on /arm and the arm motor topics; the passive sensors keep
+their legacy /sensors/* names.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ from .protocol import (
     ROLE_ARM,
     ROLE_CHASSIS,
     ROLE_NAMES,
+    ROLE_SENSOR,
     MSG_ARM_DISARM,
     MSG_ARM_INIT,
     MSG_ARM_JOINTS,
@@ -70,7 +75,6 @@ from .protocol import (
     FrameParser,
     RoleRouteTable,
     build_frame,
-    build_sensor_enable,
     build_traction_cmd,
     parse_identity,
     parse_thermal_header,
@@ -222,7 +226,10 @@ class ESP32BridgeNode(Node):
         # /dev/ttyCH341USB* is the Jetson's out-of-tree WCH CH341 driver name for the
         # ESP32 PCBs' CH340 UART (the stock kernel lacks CH341, so they do NOT appear
         # as ttyUSB* nor under /dev/serial/by-id). The bridge opens every match and
-        # auto-detects each board's role, so a single glob covers chassis + arm PCBs.
+        # auto-detects each board's role, so a single glob covers the chassis + arm
+        # PCBs and the sensor DevKit (also CH340). If a sensor DevKit ever enumerates
+        # as a CP2102 (/dev/ttyUSB*), give it a udev symlink and add that here —
+        # don't glob /dev/ttyUSB* wholesale or the bridge will race the RPLidar.
         self.declare_parameter('serial_candidates', '/dev/ttyCH341USB*,/dev/serial/by-id/*,/dev/serial/by-path/*')
         self.declare_parameter('baud_rate', 921600)
         self.declare_parameter('reconnect_period', 3.0)
@@ -312,15 +319,14 @@ class ESP32BridgeNode(Node):
         self._odom_yaw = 0.0
         self._odom_last_t = None
 
-        # Arm-PCB passive sensors (MLX90640 thermal + LIS3MDL mag) arrive over the
-        # ARM UART link; republish them on the same topics the old Jetson I2C nodes
-        # used, and relay the GUI's /sensors/enable_mask down as MSG_SENSOR_ENABLE.
+        # Passive victim-detection sensors (MLX90640 thermal + QMC5883L mag) arrive
+        # over the dedicated sensor ESP32's UART link; republish them on the same
+        # topics the old arm-PCB/Jetson-I2C paths used. They are always-on — there
+        # is no enable mask; the GUI toggles are display-only.
         self.declare_parameter('thermal_frame_id', 'mlx90640_link')
         self.declare_parameter('mag_frame_id', 'mag_link')
-        self.declare_parameter('default_sensor_mask', 3)  # bit0 mag, bit1 thermal (on)
         self._thermal_frame_id = str(self.get_parameter('thermal_frame_id').value)
         self._mag_frame_id = str(self.get_parameter('mag_frame_id').value)
-        self._sensor_mask = int(self.get_parameter('default_sensor_mask').value) & 0xFF
         self._thermal_last_t = None
         self._thermal_rate_hz = 0.0
 
@@ -352,7 +358,7 @@ class ESP32BridgeNode(Node):
         self._pub_lktech = self.create_publisher(Float32MultiArray, '/motors/lktech_status', sensor_qos)
         self._pub_ze300 = self.create_publisher(Float32MultiArray, '/motors/ze300_status', sensor_qos)
         self._pub_odrv_err = self.create_publisher(Float32MultiArray, '/motors/odrive_error', sensor_qos)
-        # Arm-PCB passive sensors, republished on the legacy topic names/types.
+        # Sensor-ESP32 passive sensors, republished on the legacy topic names/types.
         self._pub_mag = self.create_publisher(MagneticField, '/sensors/mag', sensor_qos)
         self._pub_thermal = self.create_publisher(Image, '/sensors/thermal', sensor_qos)
         self._pub_thermal_raw = self.create_publisher(Image, '/sensors/thermal_raw', sensor_qos)
@@ -403,10 +409,8 @@ class ESP32BridgeNode(Node):
         # and wait for a fresh operator request rather than auto-resuming.
         self.create_subscription(Twist, '/cmd_vel', self._on_cmd_vel, 10)
         self.create_subscription(Bool, '/autonomy/enable', self._on_autonomy_enable, 10)
-        # GUI enable mask (bit0 mag, bit1 thermal) → relayed to the ARM PCB. Latched
-        # QoS so a late-joining bridge picks up the operator's last choice; until one
-        # arrives we use default_sensor_mask, sent when the arm link identifies.
-        self.create_subscription(UInt8, '/sensors/enable_mask', self._on_enable_mask, latched_qos)
+        # (No /sensors/enable_mask any more — the sensor ESP32 publishes its
+        # mag/thermal continuously and the GUI toggles are display-only.)
         # Watchdog: release the tracks back to RC if /cmd_vel goes stale.
         self.create_timer(0.1, self._cmd_vel_watchdog)
         self.create_timer(0.5, self._arm_link_watchdog)
@@ -429,8 +433,15 @@ class ESP32BridgeNode(Node):
             MSG_ZE300_STATUS: self._handle_ze300_status,
             MSG_ODRIVE_ERROR: self._handle_odrive_error,
             MSG_ARM_LIFECYCLE: self._handle_arm_lifecycle,
+        }
+        self._sensor_handlers = {
             MSG_MAG: self._handle_mag,
             MSG_SENSOR_THERMAL: self._handle_thermal,
+        }
+        self._handlers_by_role = {
+            ROLE_CHASSIS: self._chassis_handlers,
+            ROLE_ARM: self._arm_handlers,
+            ROLE_SENSOR: self._sensor_handlers,
         }
 
         self._links_lock = threading.Lock()
@@ -522,7 +533,9 @@ class ESP32BridgeNode(Node):
         role = link.role
         if role is None:
             return
-        handlers = self._chassis_handlers if role == ROLE_CHASSIS else self._arm_handlers
+        handlers = self._handlers_by_role.get(role)
+        if handlers is None:
+            return
         handler = handlers.get(msg_type)
         if handler is None:
             return
@@ -564,9 +577,8 @@ class ESP32BridgeNode(Node):
         elif identity.role == ROLE_ARM:
             if self._software_estop_active or self._estop_mirror.active:
                 link.send(build_frame(MSG_ESTOP, b''))
-            # Push the current sensor enable mask so a freshly-(re)connected arm
-            # PCB starts its mag/thermal in the operator's last-chosen state.
-            link.send(build_sensor_enable(self._sensor_mask))
+        # ROLE_SENSOR needs nothing pushed on (re)connect: its sensors are
+        # always-on and it accepts no commands.
 
     def _send_to_role(self, role: int, frame: bytes, reason: str, log_missing: bool = True) -> bool:
         with self._links_lock:
@@ -893,7 +905,7 @@ class ESP32BridgeNode(Node):
         self._pub_arm_mode.publish(String(data='DEXTERITY'))
         self._pub_arm_active.publish(UInt8(data=0))
 
-    # Arm-PCB passive sensors (I2C, read on the arm ESP32).
+    # Passive victim-detection sensors (I2C, read on the dedicated sensor ESP32).
     def _handle_mag(self, payload: bytes):
         if len(payload) < 6:
             return
@@ -1040,14 +1052,6 @@ class ESP32BridgeNode(Node):
         val = max(-1.0, min(1.0, float(msg.data)))
         self._send_to_role(ROLE_ARM, build_frame(MSG_GRIPPER, struct.pack('<h', int(val * 1000.0))),
                            'gripper command')
-
-    def _on_enable_mask(self, msg: UInt8):
-        # Relay the GUI's passive-sensor enable mask (bit0 mag, bit1 thermal) to the
-        # ARM PCB. Cached so _handle_identity can re-send it to a reconnecting arm.
-        mask = int(msg.data) & 0xFF
-        self._sensor_mask = mask
-        self._send_to_role(ROLE_ARM, build_sensor_enable(mask), 'sensor enable mask',
-                           log_missing=False)
 
     def _normalise_ppm(self, ch: int, ppm) -> float:
         # Mirror the firmware RC::normalise: asymmetric min/neutral/max → [-1, 1].

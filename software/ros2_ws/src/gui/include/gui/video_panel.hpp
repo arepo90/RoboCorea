@@ -29,6 +29,12 @@ public:
     void updateSources(const QStringList& names, const QStringList& identifiers);
     void updateFilters(const QStringList& names);
 
+public slots:
+    // Dashboard "Thermal display" toggle (display-only — acquisition is always
+    // on): true selects the thermal source in the first free cell (no-op if a
+    // cell already shows it), false deselects it from every cell.
+    void setThermalDisplayed(bool shown);
+
 signals:
     void thermalActiveChanged(bool active);
 

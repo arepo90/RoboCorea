@@ -10,7 +10,7 @@ only subscribe. Run them from the repo-root dispatcher:
     ./diagnose.sh link            # comms / which boards are talking   (live)
     ./diagnose.sh ppm             # RC / PPM channels                  (live)
     ./diagnose.sh can             # CAN presence (VESCs + arm joints)  (live)
-    ./diagnose.sh sensors         # arm-PCB I2C sensors (thermal/mag)  (live)
+    ./diagnose.sh sensors         # sensor-ESP32 I2C sensors (thermal/mag) (live)
 
 …or directly:  ros2 run esp32_bridge diag_link|diag_ppm|diag_can|diag_sensors|diag_all
 
@@ -160,8 +160,8 @@ class LinkDiag(Node):
         self.mode = None
         self.diag_kv = {}
         self.r_tel = Rate()      # chassis PCB heartbeat
-        self.r_mag = Rate()      # arm PCB (mag, ~50 Hz when enabled)
-        self.r_therm = Rate()    # arm PCB (thermal, ~4 Hz when enabled)
+        self.r_mag = Rate()      # sensor ESP32 (mag, ~50 Hz, always-on)
+        self.r_therm = Rate()    # sensor ESP32 (thermal, ~4 Hz, always-on)
         self.arm_state = None
         self.create_subscription(Float32MultiArray, '/robot/telemetry',
                                  lambda m: self.r_tel.tick(), sensor_qos())
@@ -193,14 +193,19 @@ class LinkDiag(Node):
         if not chassis:
             print('    ' + bad('-> no /robot/telemetry. esp32-bridge down, chassis USB '
                                'unplugged, or domain/Zenoh mismatch. See OPERATIONS §A/§B.'))
-        # Arm board: visible via its sensor stream (needs the enable mask on) or lifecycle.
-        arm_seen = self.r_mag.fresh() or self.r_therm.fresh() or self.arm_state is not None
-        print(f'{led("ok" if (self.r_mag.fresh() or self.r_therm.fresh()) else ("warn" if arm_seen else "bad"))} '
-              f'arm PCB: mag={self.r_mag.hz():.0f}Hz thermal={self.r_therm.hz():.0f}Hz '
-              f'state={self.arm_state or dim("?")}')
-        if not (self.r_mag.fresh() or self.r_therm.fresh()):
-            print('    ' + dim('-> no arm-PCB sensor stream. If the arm works, the '
-                               'Thermal/Mag enable toggles are just off. Else arm USB down.'))
+        # Arm board: visible via its lifecycle stream.
+        arm_seen = self.arm_state is not None
+        print(f'{led("ok" if arm_seen else "bad")} '
+              f'arm PCB: state={self.arm_state or dim("?")}')
+        if not arm_seen:
+            print('    ' + dim('-> no /arm/state. Arm USB down or bridge not running.'))
+        # Sensor ESP32: its mag/thermal streams are always-on, so silence = board down.
+        sensor_seen = self.r_mag.fresh() or self.r_therm.fresh()
+        print(f'{led("ok" if sensor_seen else "bad")} '
+              f'sensor ESP32: mag={self.r_mag.hz():.0f}Hz thermal={self.r_therm.hz():.0f}Hz')
+        if not sensor_seen:
+            print('    ' + dim('-> no sensor stream. Sensor DevKit USB down, or both '
+                               'I2C sensors unreachable (they publish always-on).'))
         if self.flags is not None:
             b = flag_bits(self.flags)
             print(f'    flags: minipc_connected={led("ok" if b["minipc_connected"] else "bad")} '
@@ -329,7 +334,7 @@ class CanDiag(Node):
                 print(f'    {warn("ODrive err")} node 0x{n:02x}: 0x{int(e):08x}')
 
 
-# ── arm-PCB I2C sensors ─────────────────────────────────────────────────────────
+# ── sensor-ESP32 I2C sensors ────────────────────────────────────────────────────
 class SensorsDiag(Node):
     def __init__(self):
         super().__init__('diag_sensors')
@@ -354,9 +359,9 @@ class SensorsDiag(Node):
         self.tstat = m
 
     def report(self):
-        print('\n=== arm-PCB I2C sensors ===')
-        print(dim('  (MLX90640 thermal + LIS3MDL mag live on the ARM PCB, relayed by the '
-                  'bridge — no Jetson I2C.)'))
+        print('\n=== sensor-ESP32 I2C sensors ===')
+        print(dim('  (MLX90640 thermal + QMC5883L mag live on the dedicated sensor ESP32, '
+                  'relayed by the bridge — always-on, no enable mask.)'))
         # Magnetometer
         if self.r_mag.fresh():
             x, y, z = self.mag_xyz
@@ -364,7 +369,7 @@ class SensorsDiag(Node):
                   f'B=({x*1e6:+.0f}, {y*1e6:+.0f}, {z*1e6:+.0f}) µT')
         else:
             print(f'{led("bad")} mag: {bad("no data")}  '
-                  + dim('-> Mag enable toggle off, or arm-PCB link/I2C down (§E).'))
+                  + dim('-> sensor-ESP32 link down or QMC5883L I2C unreachable (§E).'))
         # Thermal
         if self.tstat is not None and self.r_therm.fresh():
             t = self.tstat
@@ -375,12 +380,12 @@ class SensorsDiag(Node):
                   f'{t.center_temperature:.1f}°C  errs={t.consecutive_read_errors}')
             if t.consecutive_read_errors > 3:
                 print('    ' + warn('-> consecutive I2C read errors — check MLX90640 wiring / '
-                                    'SENSOR_I2C_HZ on the arm PCB.'))
+                                    'SENSOR_I2C_HZ on the sensor ESP32.'))
         elif self.r_therm.fresh():
             print(f'{led("ok")} thermal: {self.r_therm.hz():.1f} Hz (no status msg)')
         else:
             print(f'{led("bad")} thermal: {bad("no data")}  '
-                  + dim('-> Thermal enable toggle off, or arm-PCB link/I2C down (§E).'))
+                  + dim('-> sensor-ESP32 link down or MLX90640 I2C unreachable (§E).'))
 
 
 # ── one-shot aggregate ──────────────────────────────────────────────────────────
