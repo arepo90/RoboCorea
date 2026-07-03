@@ -19,6 +19,7 @@
 #include <QFrame>
 #include <QScrollArea>
 #include <QSplitter>
+#include <QTabWidget>
 #include <QStatusBar>
 
 #include <memory>
@@ -34,12 +35,10 @@ MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget* parent)
     camera_hub_ = std::make_shared<CameraHub>();
     video_panel_ = new VideoPanel(node_, camera_hub_, this);
 
-    // Layout: the left section is a 2×2 grid of 3 video cells plus the telemetry
-    // (odometry) panel in the bottom-right cell; the right section is the digital
-    // twin on top over the dashboard (connections), which now fills the space the
-    // telemetry used to share. buildRightColumn() creates the panels.
+    // Layout: the left section is a full 2×2 grid of video cells; the right
+    // section is the digital twin on top over a Dashboard | Odometry tab
+    // widget. buildRightColumn() creates the panels.
     auto* right_column = buildRightColumn();
-    video_panel_->setCornerWidget(wrapScroll(odometry_panel_));
 
     auto* main_splitter = new QSplitter(Qt::Horizontal, this);
     main_splitter->addWidget(video_panel_);
@@ -231,15 +230,19 @@ QWidget* MainWindow::buildRightColumn()
     // spanning the full width of the right section.
     digital_twin_panel_ = new DigitalTwinPanel(node_, this);
 
-    // The odometry (telemetry) panel is created here but hosted in the video
-    // grid's bottom-right cell (see the constructor); the dashboard (connections)
-    // now occupies the whole bottom of this right section.
+    // Bottom: the dashboard (connections) and the odometry (telemetry) panel as
+    // tabs — the odometry panel used to sit in the video grid's bottom-right
+    // cell, which is now a fourth video cell.
     odometry_panel_ = new OdometryPanel(node_, this);
     dashboard_panel_ = new DashboardPanel(node_, this);
 
+    auto* bottom_tabs = new QTabWidget(this);
+    bottom_tabs->addTab(wrapScroll(dashboard_panel_), "Dashboard");
+    bottom_tabs->addTab(wrapScroll(odometry_panel_), "Odometry");
+
     auto* right_splitter = new QSplitter(Qt::Vertical, this);
     right_splitter->addWidget(digital_twin_panel_);
-    right_splitter->addWidget(wrapScroll(dashboard_panel_));
+    right_splitter->addWidget(bottom_tabs);
     right_splitter->setSizes({420, 480});
     return right_splitter;
 }

@@ -16,7 +16,7 @@ VideoPanel::VideoPanel(rclcpp::Node::SharedPtr node,
     for (int i = 0; i < VIDEO_CELLS; ++i) {
         auto* w = new VideoWidget(node, hub, this);
         widgets_.push_back(w);
-        grid_->addWidget(w, i / COLS, i % COLS);   // (0,0) (0,1) (1,0)
+        grid_->addWidget(w, i / COLS, i % COLS);
 
         connect(w, &VideoWidget::displayClicked, this,
                 [this, i]() { onWidgetClicked(i); });
@@ -26,13 +26,6 @@ VideoPanel::VideoPanel(rclcpp::Node::SharedPtr node,
 
     for (int r = 0; r < ROWS; ++r) grid_->setRowStretch(r, 1);
     for (int c = 0; c < COLS; ++c) grid_->setColumnStretch(c, 1);
-}
-
-void VideoPanel::setCornerWidget(QWidget* w)
-{
-    corner_ = w;
-    if (corner_)
-        grid_->addWidget(corner_, ROWS - 1, COLS - 1);   // bottom-right (1,1)
 }
 
 void VideoPanel::updateSources(const QStringList& names,
@@ -88,21 +81,18 @@ void VideoPanel::onWidgetClicked(int index)
             widgets_[i]->setPaused(false);
             widgets_[i]->show();
         }
-        if (corner_) corner_->show();   // restore the telemetry cell
         for (int r = 0; r < ROWS; ++r) grid_->setRowStretch(r, 1);
         for (int c = 0; c < COLS; ++c) grid_->setColumnStretch(c, 1);
         enlarged_index_ = -1;
     } else {
-        // Enlarge the clicked cell to span the whole grid; pause/hide the rest
-        // (videos and the corner/telemetry cell). The enlarged cell becomes
-        // interactive (pinch/scroll zoom, drag pan).
+        // Enlarge the clicked cell to span the whole grid; pause/hide the rest.
+        // The enlarged cell becomes interactive (pinch/scroll zoom, drag pan).
         for (int i = 0; i < VIDEO_CELLS; ++i) {
             if (i != index) {
                 widgets_[i]->setPaused(true);
                 widgets_[i]->hide();
             }
         }
-        if (corner_) corner_->hide();
         grid_->removeWidget(widgets_[index]);
         grid_->addWidget(widgets_[index], 0, 0, ROWS, COLS);
         widgets_[index]->setPaused(false);

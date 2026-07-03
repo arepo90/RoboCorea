@@ -373,6 +373,7 @@ void VideoWidget::onSourceChanged(int index)
     {
         std::lock_guard<std::mutex> lock(sub_mutex_);
         image_sub_.reset();
+        compressed_sub_.reset();
         thermal_sub_.reset();
     }
     {
@@ -403,6 +404,20 @@ void VideoWidget::onSourceChanged(int index)
         {
             std::lock_guard<std::mutex> lock(sub_mutex_);
             image_sub_ = sub;
+        }
+        source_type_ = SourceType::ROS_TOPIC;
+    } else if (source.startsWith("ctopic:")) {
+        // Robot cameras in the ros2 transport mode: JPEG CompressedImage,
+        // decoded on arrival — everything downstream sees a normal BGR frame.
+        std::string topic = source.mid(7).toStdString();
+        auto sub = node_->create_subscription<sensor_msgs::msg::CompressedImage>(
+            topic, rclcpp::SensorDataQoS(),
+            [this](sensor_msgs::msg::CompressedImage::SharedPtr msg) {
+                onCompressedReceived(msg);
+            });
+        {
+            std::lock_guard<std::mutex> lock(sub_mutex_);
+            compressed_sub_ = sub;
         }
         source_type_ = SourceType::ROS_TOPIC;
     } else if (source.startsWith("thermal:")) {
@@ -656,6 +671,19 @@ void VideoWidget::onImageReceived(const sensor_msgs::msg::Image::SharedPtr& msg)
     else if (enc == "rgba8") cv::cvtColor(raw, bgr, cv::COLOR_RGBA2BGR);
     else if (enc == "bgra8") cv::cvtColor(raw, bgr, cv::COLOR_BGRA2BGR);
     else                     bgr = raw.clone();
+
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    latest_ros_frame_ = std::move(bgr);
+}
+
+void VideoWidget::onCompressedReceived(
+    const sensor_msgs::msg::CompressedImage::SharedPtr& msg)
+{
+    if (msg->data.empty()) return;
+    cv::Mat raw(1, static_cast<int>(msg->data.size()), CV_8UC1,
+                const_cast<uint8_t*>(msg->data.data()));
+    cv::Mat bgr = cv::imdecode(raw, cv::IMREAD_COLOR);
+    if (bgr.empty()) return;   // truncated/undecodable frame — keep the last one
 
     std::lock_guard<std::mutex> lock(frame_mutex_);
     latest_ros_frame_ = std::move(bgr);

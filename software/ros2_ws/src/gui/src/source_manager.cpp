@@ -195,20 +195,28 @@ void SourceManager::onConfigReceived(const std_msgs::msg::String::SharedPtr msg)
 
 void SourceManager::onCameraStreamsReceived(const std_msgs::msg::String::SharedPtr msg)
 {
-    // { "cameras": [ {"name": "...", "port": 8900}, ... ] } — video-only SRT
-    // streams the robot auto-detected. The A/V primary (C920) is intentionally
-    // NOT here; it stays a static A/V source (AppSettings + GstAvStream).
+    // { "cameras": [ {"name","transport":"srt","port":8900} |
+    //                {"name","transport":"ros2","topic":"/robot/cameras/x/compressed"},
+    //                ... ] } — video streams the robot auto-detected. `transport`
+    // is absent from pre-ros2-mode catalogs → treat as "srt". In SRT mode the
+    // A/V primary (C920) is intentionally NOT here (it stays a static A/V
+    // source: AppSettings + GstAvStream); in ros2 mode its video topic IS.
     QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(msg->data));
 
-    std::vector<std::pair<std::string, int>> cams;
+    std::vector<DynCam> cams;
     if (doc.isObject()) {
         for (const auto& v : doc.object().value("cameras").toArray()) {
             if (!v.isObject()) continue;
             QJsonObject c = v.toObject();
-            const int port = c.value("port").toInt(0);
-            const std::string name = c.value("name").toString().toStdString();
-            if (port > 0 && !name.empty())
-                cams.emplace_back(name, port);
+            DynCam cam;
+            cam.name = c.value("name").toString().toStdString();
+            cam.transport = c.value("transport").toString("srt").toStdString();
+            cam.port = c.value("port").toInt(0);
+            cam.topic = c.value("topic").toString().toStdString();
+            if (cam.name.empty()) continue;
+            if (cam.transport == "ros2" ? cam.topic.empty() : cam.port <= 0)
+                continue;
+            cams.push_back(std::move(cam));
         }
     }
 
@@ -248,8 +256,10 @@ void SourceManager::rebuildSourceList()
         }
     }
 
-    // Robot-advertised, auto-detected SRT cameras (camera_streamer node). Built
-    // into "gst:" receive pipelines with the configured Jetson host + latency.
+    // Robot-advertised, auto-detected cameras (camera_streamer node). SRT
+    // entries become "gst:" receive pipelines with the configured Jetson host
+    // + latency; ros2 entries become "ctopic:" CompressedImage subscriptions
+    // (no host needed — they ride the ROS graph).
     {
         std::string host;
         {
@@ -257,11 +267,16 @@ void SourceManager::rebuildSourceList()
             host = AppSettings::instance().default_robot_host;
         }
         std::lock_guard<std::mutex> lock(dyn_mutex_);
-        for (const auto& [name, port] : dynamic_cameras_) {
-            if (host.empty()) break;   // nothing to connect to yet
-            names << QString::fromStdString(name);
+        for (const auto& cam : dynamic_cameras_) {
+            if (cam.transport == "ros2") {
+                names << QString::fromStdString(cam.name);
+                ids << QString::fromStdString("ctopic:" + cam.topic);
+                continue;
+            }
+            if (host.empty()) continue;   // SRT needs the robot host configured
+            names << QString::fromStdString(cam.name);
             ids << QString::fromStdString(
-                "gst:" + buildSrtRxPipeline(host, port, /*latency_ms=*/120));
+                "gst:" + buildSrtRxPipeline(host, cam.port, /*latency_ms=*/120));
         }
     }
 

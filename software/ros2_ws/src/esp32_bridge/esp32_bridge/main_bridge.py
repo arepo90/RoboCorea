@@ -22,7 +22,9 @@ import ast
 import glob
 import math
 import os
+import signal
 import struct
+import subprocess
 import threading
 import time
 
@@ -132,11 +134,19 @@ class SerialLink:
         self._thread.start()
 
     def stop(self):
+        # Only signal: the reader drains out of its <=0.1 s poll and closes the
+        # port itself (_run's tail). Closing here raced the in-flight ser.read()
+        # (pyserial fd=None TypeError) and left the WCH ch341 driver mid-URB —
+        # with an immediate reopen after a service restart that has wedged the
+        # whole tegra-xusb hub (EIO on every open until reset/reboot).
         self._stop.set()
-        self._drop_serial()
 
     def join(self, timeout: float = 1.0):
         self._thread.join(timeout=timeout)
+
+    def close(self):
+        # Fallback for a reader that didn't exit within the join timeout.
+        self._drop_serial()
 
     def send(self, frame: bytes) -> bool:
         bad_serial = False
@@ -147,7 +157,7 @@ class SerialLink:
             try:
                 ser.write(frame)
                 return True
-            except (serial.SerialException, OSError) as e:
+            except (serial.SerialException, OSError, TypeError) as e:
                 bad_serial = True
                 self.node.get_logger().error(f'{self.path} write error: {e}; reconnecting')
         if bad_serial:
@@ -168,8 +178,10 @@ class SerialLink:
                 self._ser = ser
             self.parser.reset()
             self.node.get_logger().info(f'Opened ESP candidate {self.path} @ {self.baud_rate}')
+            self.node._note_open_success(self.path)
             return True
         except (serial.SerialException, OSError) as e:
+            self.node._note_open_failure(self.path, e)
             now = time.monotonic()
             if now - self._last_open_warn >= 10.0:
                 self._last_open_warn = now
@@ -205,7 +217,8 @@ class SerialLink:
 
             try:
                 raw = self._read(256)
-            except (serial.SerialException, OSError) as e:
+            except (serial.SerialException, OSError, TypeError) as e:
+                # TypeError = pyserial's fd went None under a concurrent close.
                 self.node.get_logger().error(f'{self.path} read error: {e}; reconnecting')
                 self._drop_serial()
                 continue
@@ -214,7 +227,20 @@ class SerialLink:
 
             self.last_rx_monotonic = time.monotonic()
             for msg_type, payload in self.parser.feed(raw):
-                self.node._on_serial_frame(self, msg_type, payload)
+                if self._stop.is_set():
+                    break
+                try:
+                    self.node._on_serial_frame(self, msg_type, payload)
+                except Exception:
+                    # Publishers get torn down under us during shutdown; a
+                    # frame that raced destroy_node() is not worth a traceback.
+                    if self._stop.is_set() or not rclpy.ok():
+                        break
+                    raise
+
+        # The reader owns the fd: close only after the last read has returned,
+        # so the ch341 driver never sees a close racing an in-flight URB.
+        self._drop_serial()
 
 
 class ESP32BridgeNode(Node):
@@ -238,6 +264,20 @@ class ESP32BridgeNode(Node):
             'joint_names',
             ['Joint1', 'Joint2', 'Joint3', 'Joint4', 'Joint5', 'Joint6'])
         self.declare_parameter('joint_command_signs', [-1.0, -1.0, -1.0, -1.0, -1.0, 1.0])
+
+        # USB self-heal: the WCH ch341 driver (V1.9) corrupts the CH340/xusb
+        # state on ~50% of port closes — every subsequent open gets EIO until
+        # the USB controller is re-enumerated. When we see a persistent EIO
+        # streak we invoke this root helper (narrow sudoers NOPASSWD rule,
+        # installed by scripts/setup-usb-reset.sh) and let the normal 3 s
+        # retry loop reconnect. Empty string disables.
+        self.declare_parameter('usb_reset_helper', '/usr/local/bin/robocorea-reset-usb')
+        self._usb_reset_helper = str(self.get_parameter('usb_reset_helper').value or '')
+        self._eio_streak: dict[str, int] = {}
+        self._last_usb_reset = -1e9
+        # Both port threads hit their EIO streak within the same retry round;
+        # serialize the trigger so the helper is launched exactly once.
+        self._usb_reset_lock = threading.Lock()
 
         self._serial_port = str(self.get_parameter('serial_port').value or '')
         self._serial_candidates = self.get_parameter('serial_candidates').value
@@ -1142,6 +1182,36 @@ class ESP32BridgeNode(Node):
         self._pub_deadband.publish(db)
         self.get_logger().info(f'PPM calibration sent (deadband={db.data:.3f})')
 
+    def _note_open_success(self, path: str):
+        self._eio_streak.pop(path, None)
+
+    def _note_open_failure(self, path: str, err: Exception):
+        # Only EIO is the wedge signature; ENOENT/EBUSY just mean unplugged or
+        # contended, which a controller reset would not help (and would bounce
+        # the cameras for nothing).
+        if 'Errno 5' not in str(err):
+            self._eio_streak.pop(path, None)
+            return
+        if not self._usb_reset_helper:
+            return
+        with self._usb_reset_lock:
+            streak = self._eio_streak.get(path, 0) + 1
+            self._eio_streak[path] = streak
+            now = time.monotonic()
+            if streak < 3 or now - self._last_usb_reset < 120.0:
+                return
+            self._last_usb_reset = now
+            self._eio_streak.clear()
+        self.get_logger().error(
+            f'{path}: persistent EIO on open — USB serial stack is wedged '
+            f'(ch341 close bug); invoking {self._usb_reset_helper} to '
+            f're-enumerate USB. Cameras will blip; links reconnect on retry.')
+        try:
+            subprocess.Popen(['sudo', '-n', self._usb_reset_helper],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self.get_logger().error(f'USB reset helper failed to launch: {e}')
+
     def destroy_node(self):
         self._discovery_stop.set()
         if hasattr(self, '_discovery_thread'):
@@ -1152,6 +1222,8 @@ class ESP32BridgeNode(Node):
             link.stop()
         for link in links:
             link.join(timeout=1.0)
+        for link in links:
+            link.close()   # no-op if the reader already closed on its way out
         return super().destroy_node()
 
 
@@ -1163,8 +1235,26 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # Under systemd, KillMode=control-group SIGINTs this process directly
+        # AND ros2 launch forwards its own SIGINT a moment later — the second
+        # one used to land inside destroy_node()'s thread joins and abort the
+        # teardown before the serial ports were closed cleanly. Keep redoing
+        # the teardown until it completes without a KeyboardInterrupt landing
+        # mid-way (SIG_IGN is re-armed first on every lap in case the signal
+        # beat the previous attempt to it).
+        while True:
+            try:
+                try:
+                    signal.signal(signal.SIGINT, signal.SIG_IGN)
+                except ValueError:
+                    pass   # not on the main thread
+                node.destroy_node()
+                rclpy.shutdown()
+            except KeyboardInterrupt:
+                continue
+            except Exception:
+                pass   # links already closed; nothing useful left to salvage
+            break
 
 
 if __name__ == '__main__':

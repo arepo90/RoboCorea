@@ -23,6 +23,8 @@ class CameraHub;
 //   "local:N"       → V4L2 /dev/videoN (RF driving cams, USB webcams)
 //   "gst:<pipe>"    → GStreamer pipeline (C920 SRT + robot-advertised SRT cams)
 //   "topic:/foo"    → generic sensor_msgs/Image topic
+//   "ctopic:/foo"   → sensor_msgs/CompressedImage (JPEG) topic — the robot's
+//                     cameras when camera_streamer runs the ros2 transport
 //   "thermal:/foo"  → thermal sensor_msgs/Image topic (colormapped on display)
 class SourceManager : public QObject {
     Q_OBJECT
@@ -69,10 +71,22 @@ private:
     std::mutex net_mutex_;
     std::vector<std::pair<std::string, std::string>> network_streams_;  // (name, id)
 
-    // Dynamic SRT cameras advertised by the robot's camera_streamer node
-    // (name, port). Turned into "gst:" sources at rebuild using default_robot_host.
+    // Dynamic cameras advertised by the robot's camera_streamer node. Per the
+    // catalog's `transport` field each entry is either an SRT stream (port —
+    // turned into a "gst:" source at rebuild using default_robot_host) or a
+    // ros2 CompressedImage topic (→ a "ctopic:" source, host-independent).
+    struct DynCam {
+        std::string name;
+        std::string transport;  // "srt" | "ros2"
+        int port{0};             // srt
+        std::string topic;       // ros2
+        bool operator==(const DynCam& o) const {
+            return name == o.name && transport == o.transport &&
+                   port == o.port && topic == o.topic;
+        }
+    };
     std::mutex dyn_mutex_;
-    std::vector<std::pair<std::string, int>> dynamic_cameras_;
+    std::vector<DynCam> dynamic_cameras_;
 
     std::mutex config_mutex_;
     std::vector<std::string> config_topics_;

@@ -9,6 +9,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
 #include <atomic>
@@ -54,7 +55,8 @@ private:
 //
 // Sources:
 //   CAPTURE   → pull frames from CameraHub (local:N V4L2 or gst:<pipe> SRT)
-//   ROS_TOPIC → sensor_msgs/Image subscription
+//   ROS_TOPIC → sensor_msgs/Image (topic:) or CompressedImage (ctopic:,
+//               JPEG-decoded on arrival) subscription
 //   THERMAL   → sensor_msgs/Image subscription, colormapped on display
 class VideoWidget : public QWidget {
     Q_OBJECT
@@ -103,6 +105,7 @@ private:
 
     void workerLoop();
     void onImageReceived(const sensor_msgs::msg::Image::SharedPtr& msg);
+    void onCompressedReceived(const sensor_msgs::msg::CompressedImage::SharedPtr& msg);
     void onThermalReceived(const sensor_msgs::msg::Image::SharedPtr& msg);
     static QImage matToQImage(const cv::Mat& mat);
 
@@ -145,6 +148,7 @@ private:
     // ROS subscriptions.
     std::mutex sub_mutex_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr thermal_sub_;
 
     // Latest frame from a ROS callback.

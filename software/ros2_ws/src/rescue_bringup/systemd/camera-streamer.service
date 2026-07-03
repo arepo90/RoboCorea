@@ -1,21 +1,41 @@
 [Unit]
-Description=RoboCorea camera streamer (auto-detect USB cams + ZED tap -> SRT to GUI)
+Description=RoboCorea camera streamer (auto-detect USB cams + ZED tap -> GUI)
 # Replaces the old c920-stream.service: a ROS 2 node that auto-detects every USB
-# UVC camera, streams each to the GUI over SRT (H.264/MPEG-TS, video-only),
-# gives the primary C920 its mic as Opus (the A/V stream), taps the ZED SDK's
-# published left image into its own SRT stream, and advertises the live list on
-# /robot/camera_streams so the GUI auto-populates + handles hot-plug. The video
-# rides SRT (not DDS/Zenoh); only the ZED tap + catalog are ROS.
+# UVC camera and ships each to the GUI over the selected transport — SRT
+# (H.264/MPEG-TS, default) or ros2 (sensor_msgs/CompressedImage topics, MJPEG
+# passthrough). The primary C920's mic rides SRT as Opus in both modes (muxed
+# A/V in srt mode, audio-only in ros2 mode). Also taps the ZED SDK's published
+# left image into its own SRT stream, and advertises the live list on
+# /robot/camera_streams so the GUI auto-populates + handles hot-plug.
 After=network-online.target
 Wants=network-online.target
+# Keep the USB hub quiet while the bridge (re)opens its CH340 serial ports:
+# cameras start AFTER the bridge and (ordering reversed on the way down) stop
+# BEFORE it. Cycling the CH340s under heavy UVC streaming on the same hub
+# wedges tegra-xusb — EIO on every serial open until reset-usb-serial.sh.
+After=esp32-bridge.service
 
 [Service]
 # Must match the workstation/GUI domain (and the other robot nodes).
 Environment=ROS_DOMAIN_ID=20
+# Video transport: "srt" (default) or "ros2". Switch with a drop-in
+# (`systemctl --user edit camera-streamer`) overriding this line.
+Environment=CAMERA_TRANSPORT=srt
 # Source ROS + the workspace, then run the node. %h is $HOME; edit if different.
 # Tunables are ROS params (see camera_streamer.py): primary_match, *_port,
-# primary_audio_device, bitrate, zed_topic, zed_enable, …
-ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 run rescue_bringup camera_streamer'
+# primary_audio_device, extra_width/height/framerate, bitrate, zed_*, …
+# Clock gate: a cold boot starts at 1969 (no RTC battery) and zenoh sessions
+# born during large clock skew never stream cross-host again (architecture.md
+# §15). Wait for a sane year (chrony from the laptop syncs in seconds; 75 s cap
+# stays under the 90 s start timeout), then start anyway so bench work without
+# any time source still functions.
+ExecStartPre=/bin/bash -c 'i=0; while [ "$$(date +%%Y)" -lt 2025 ]; do [ $$i -ge 75 ] && { echo "WARN: clock unsynced (year $$(date +%%Y)); starting anyway - cross-host ROS streams will be dead until restarted after time sync" >&2; break; }; sleep 1; i=$$((i+1)); done'
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source %h/RoboCorea/software/ros2_ws/install/setup.bash && exec ros2 run rescue_bringup camera_streamer --ros-args -p transport:=${CAMERA_TRANSPORT}'
+# Settle after teardown before any reopen: an instant reopen after an unclean
+# close has wedged the tegra-xusb/CH341 stack (EIO on every open until
+# scripts/reset-usb-serial.sh). ExecStopPost runs inside `systemctl restart`
+# too, so even a hot restart gets this quiet window.
+ExecStopPost=/bin/sleep 3
 KillSignal=SIGINT
 KillMode=control-group
 TimeoutStopSec=10

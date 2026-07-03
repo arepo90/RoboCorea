@@ -98,6 +98,7 @@ UNITS_SRC="$WS/install/rescue_bringup/share/rescue_bringup/systemd"
 # ── status-only ───────────────────────────────────────────────────────────────
 if [ "$STATUS_ONLY" = 1 ]; then
   log "ROS_DOMAIN_ID=$ROS_DOMAIN_ID  RMW=${RMW_IMPLEMENTATION:-<unset>}"
+  log "clock: $(date '+%F %T %Z')  NTPSynchronized=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo '?')"
   systemctl --user --no-pager status "${ALWAYS_ON[@]}" "${ON_DEMAND[@]}" 2>/dev/null || true
   log "robot_manager / map_manager services on the bus:"
   ros2 service list 2>/dev/null | grep -E '/robot/(maps|sensors|mapping|localization|navigation)/' || \
@@ -162,6 +163,24 @@ fi
 [ "${RMW_IMPLEMENTATION:-}" = "rmw_zenoh_cpp" ] || \
   warn "RMW_IMPLEMENTATION is '${RMW_IMPLEMENTATION:-<unset>}', expected rmw_zenoh_cpp (setup-zenoh.sh sets it)."
 
+# ── 4b) clock sanity (no RTC battery: cold boot = 1969 until chrony syncs) ────
+# Zenoh sessions born during large clock skew never stream cross-host again,
+# even after the clock later syncs — the services must be (re)started AFTER
+# sync. The units carry their own ExecStartPre gate for the at-boot autostart;
+# this check covers manual runs. One-time host setup:
+#   sudo bash scripts/setup-time-sync.sh    (laptop serves NTP to the LAN)
+YEAR="$(date +%Y)"
+if [ "$YEAR" -lt 2025 ]; then
+  warn "system clock is bogus (year $YEAR) — waiting up to 90s for time sync ..."
+  for _ in $(seq 1 90); do sleep 1; YEAR="$(date +%Y)"; [ "$YEAR" -ge 2025 ] && break; done
+  if [ "$YEAR" -lt 2025 ]; then
+    warn "clock STILL unsynced (year $YEAR) — cross-host ROS streams WILL be dead."
+    warn "Fix time first (laptop up? setup-time-sync.sh run on both hosts?), then re-run $0."
+  else
+    log "clock synced (year $YEAR)."
+  fi
+fi
+
 # ── 5) start the always-on services ───────────────────────────────────────────
 start_set=(robot-manager.service map-manager.service)
 [ "$NO_BRIDGE" = 0 ] && start_set+=(esp32-bridge.service)
@@ -169,7 +188,24 @@ start_set=(robot-manager.service map-manager.service)
 
 log "enabling + (re)starting: ${start_set[*]}"
 systemctl --user enable "${start_set[@]}" >/dev/null
-systemctl --user restart "${start_set[@]}"
+# Stop, settle, then start — NOT a hot `restart`. Restart overlaps the old
+# processes' serial/UVC teardown with the new ones' opens on the same USB hub,
+# which has wedged the tegra-xusb/CH341 stack (EIO on every serial open until
+# a reboot or scripts/reset-usb-serial.sh). `stop` is synchronous; the sleep
+# gives the kernel drivers a quiet window before anything reopens.
+systemctl --user stop "${start_set[@]}" 2>/dev/null || true
+sleep 3
+# Bridge first, cameras last: cycling the CH340 serial ports while the camera
+# streamer floods the same USB hub with UVC traffic wedges tegra-xusb (EIO on
+# every serial open until scripts/reset-usb-serial.sh or a reboot). Give the
+# bridge a head start to open + identify both PCBs on a quiet hub.
+if printf '%s\n' "${start_set[@]}" | grep -qx 'esp32-bridge.service'; then
+  systemctl --user start esp32-bridge.service
+  sleep 5
+fi
+rest=()
+for u in "${start_set[@]}"; do [ "$u" = "esp32-bridge.service" ] || rest+=("$u"); done
+[ "${#rest[@]}" -gt 0 ] && systemctl --user start "${rest[@]}"
 
 # ── 6) optional: bring perception up now (else the GUI does it on demand) ──────
 if [ "$START_SENSORS" = 1 ]; then
