@@ -13,6 +13,10 @@
 #     • map-manager.service   — /robot/maps/{save,list,load,delete} for the GUI
 #     • camera-streamer.service — auto-detect USB cams + ZED tap over SRT to the
 #                               GUI, advertises them on ROS (skip: --no-camera)
+#     • sensor-esp32.service  — scripts/main.py: sensor DevKit (ttyACM0) ->
+#                               /sensors/thermal + /sensors/mag. Each (re)start
+#                               pulses EN, so re-running this script also
+#                               cleanly reboots the sensor board.
 #
 #   ON-DEMAND (left for the operator to start from the GUI "Robot Systems"
 #   window — Sensors → Mapping/Localization → Navigation), UNLESS you pass
@@ -48,7 +52,7 @@ JETSON_PKGS=(rescue_interfaces mlx90640_msgs rescue_bringup esp32_bridge \
              dicerox_mapping rescue_nav rescue_mapping3d)
 
 # Services this script owns. ALWAYS = brought up every run (subject to flags).
-ALWAYS_ON=(esp32-bridge.service robot-manager.service map-manager.service camera-streamer.service)
+ALWAYS_ON=(esp32-bridge.service robot-manager.service map-manager.service camera-streamer.service sensor-esp32.service)
 ON_DEMAND=(rescue-sensors.target rescue-mapping.service)   # only with --sensors
 
 log()  { printf '\033[1;32m[jetson]\033[0m %s\n' "$*"; }
@@ -120,6 +124,9 @@ fi
 log "installing systemd --user units from $UNITS_SRC (domain $DOMAIN)"
 mkdir -p "$USER_UNIT_DIR"
 cp -f "$UNITS_SRC"/*.service "$UNITS_SRC"/*.target "$USER_UNIT_DIR/"
+# sensor-esp32 drives scripts/main.py (not a ws package) — copy it straight
+# from the src tree so it is current even when jetson.sh runs without --build.
+cp -f "$WS/src/rescue_bringup/systemd/sensor-esp32.service" "$USER_UNIT_DIR/"
 # Pin the DDS/Zenoh partition domain in every unit to the chosen value.
 if [ "$DOMAIN" != "20" ]; then
   sed -i "s/^Environment=ROS_DOMAIN_ID=.*/Environment=ROS_DOMAIN_ID=$DOMAIN/" \
@@ -182,7 +189,7 @@ if [ "$YEAR" -lt 2025 ]; then
 fi
 
 # ── 5) start the always-on services ───────────────────────────────────────────
-start_set=(robot-manager.service map-manager.service)
+start_set=(robot-manager.service map-manager.service sensor-esp32.service)
 [ "$NO_BRIDGE" = 0 ] && start_set+=(esp32-bridge.service)
 [ "$NO_CAMERA" = 0 ] && start_set+=(camera-streamer.service)
 

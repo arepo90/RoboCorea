@@ -2,11 +2,13 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import Image, MagneticField
 from mlx90640_msgs.msg import ThermalStatus
 import serial
 import struct
 import sys
+import time
 import numpy as np
 
 MICROTESLA_TO_TESLA = 1e-6
@@ -40,7 +42,26 @@ class ESP32SensorBridge(Node):
         self._thermal_rate_hz = 0.0
 
         try:
-            self.ser = serial.Serial(port, baudrate, timeout=0.1)
+            # Bare DevKit: DTR/RTS drive the auto-reset circuit (EN / GPIO0).
+            # A default open() asserts both, and the lines don't switch
+            # atomically — sometimes EN is released while GPIO0 is still low,
+            # dropping the ESP32 into the ROM bootloader (the "have to press
+            # the reset button" failure). Open with both deasserted, then
+            # pulse EN once ourselves so every run starts from a clean app
+            # boot no matter what state the board was left in.
+            self.ser = serial.Serial()
+            self.ser.port = port
+            self.ser.baudrate = baudrate
+            self.ser.timeout = 0.1
+            self.ser.exclusive = True
+            self.ser.dtr = False
+            self.ser.rts = False
+            self.ser.open()
+            self.ser.rts = True    # EN low: hold in reset
+            time.sleep(0.1)
+            self.ser.rts = False   # EN high, GPIO0 high (DTR low) -> app boot
+            time.sleep(0.5)        # let the 115200-baud ROM boot log pass
+            self.ser.reset_input_buffer()
             self.get_logger().info(f"Connected to ESP32 on {port} at {baudrate} baud.")
         except serial.SerialException as e:
             self.get_logger().error(f"Failed to connect to Serial: {e}")
@@ -52,9 +73,11 @@ class ESP32SensorBridge(Node):
     def read_serial(self):
         # We need at least 5 bytes for our header: [0xAA] [0xBB] [Type] [Len_L] [Len_H]
         while self.ser.in_waiting >= 5:
-            # Look for sync bytes
-            sync = self.ser.read(2)
-            if sync != b'\xAA\xBB':
+            # Look for sync bytes one at a time — pair-wise reads can straddle
+            # the AA BB marker forever after a single garbage byte (boot log).
+            if self.ser.read(1) != b'\xAA':
+                continue
+            if self.ser.read(1) != b'\xBB':
                 continue
             
             msg_type = self.ser.read(1)[0]
@@ -135,12 +158,17 @@ def main(args=None):
     node = ESP32SensorBridge()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except Exception:
+        # Humble: SIGINT mid-spin can also surface as a raw RCLError
+        # ("context is not valid") instead of ExternalShutdownException.
+        if rclpy.ok():
+            raise
     finally:
         node.ser.close()
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 if __name__ == '__main__':
     main()
