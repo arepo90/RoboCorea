@@ -55,7 +55,7 @@ import rclpy
 import yaml
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import TwistStamped, PoseStamped, Pose
@@ -1092,7 +1092,7 @@ class SdlsServo(Node):
 def main():
     rclpy.init()
     node = SdlsServo()
-    executor = MultiThreadedExecutor()
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
     try:
         executor.spin()

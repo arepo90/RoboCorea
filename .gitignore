@@ -39,3 +39,4 @@ Thumbs.db
 *.swp
 *~
 .idea/
+.vscode/*
