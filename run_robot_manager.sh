@@ -26,10 +26,10 @@ set -euo pipefail
 # ── config ────────────────────────────────────────────────────────────────────
 # MUST match the workstation/GUI domain (and the Environment= line in the units).
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-20}"
-
+VERSION=jazzy
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$SCRIPT_DIR/software/ros2_ws"
-ROS_SETUP="${ROS_SETUP:-/opt/ros/humble/setup.bash}"
+ROS_SETUP="${ROS_SETUP:-/opt/ros/${VERSION}/setup.bash}"
 
 # Jetson-side packages the managers + the stacks they launch need built.
 # (MLX90640/LIS3MDL moved to the arm PCB → esp32_bridge; no jetson_sensors pkg.)

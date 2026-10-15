@@ -41,10 +41,11 @@
 set -euo pipefail
 
 # ── config ────────────────────────────────────────────────────────────────────
+VERSION=jazzy
 DOMAIN="${ROS_DOMAIN_ID:-20}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$SCRIPT_DIR/software/ros2_ws"
-ROS_SETUP="${ROS_SETUP:-/opt/ros/humble/setup.bash}"
+ROS_SETUP="${ROS_SETUP:-/opt/ros/${VERSION}/setup.bash}"
 USER_UNIT_DIR="$HOME/.config/systemd/user"
 
 # Jetson-side packages the managers + the stacks they launch need built.

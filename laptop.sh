@@ -24,10 +24,11 @@
 set -euo pipefail
 
 # ── config ────────────────────────────────────────────────────────────────────
+VERSION=jazzy
 DOMAIN="${ROS_DOMAIN_ID:-20}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$SCRIPT_DIR/software/ros2_ws"
-ROS_SETUP="${ROS_SETUP:-/opt/ros/humble/setup.bash}"
+ROS_SETUP="${ROS_SETUP:-/opt/ros/${VERSION}/setup.bash}"
 
 # Workstation packages the GUI bring-up needs.
 WS_PKGS=(rescue_interfaces mlx90640_msgs arm_description arm_teleop gui)

@@ -36,8 +36,8 @@
   <!-- Optional, for mesh-on-mesh self-collision avoidance (sdls_servo
        collision_check). pip-only, no rosdep key: `pip install python-fcl trimesh`.
        If absent the servo logs a warning and runs without collision checking. -->
-  <!-- <exec_depend>python-fcl</exec_depend> -->
-  <!-- <exec_depend>trimesh</exec_depend> -->
+  <exec_depend>hpp-fcl</exec_depend>
+  <!-- <exec_depend>python3-trimesh</exec_depend> -->
 
   <export>
     <build_type>ament_python</build_type>

@@ -24,7 +24,7 @@ import os
 import numpy as np
 
 try:
-    import fcl
+    import hppfcl as fcl
     import trimesh
     HAVE_DEPS = True
     _IMPORT_ERROR = ''

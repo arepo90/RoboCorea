@@ -1,5 +1,6 @@
 # RoboCorea — Operations runbook (mapping, localization & navigation)
 
+> ***Note for `port/jazzy`:*** WPI - References to humble in paths and imports to be corrected
 > **Audience:** someone who knows the robot and what it can do, but has never run
 > its software. This is the *practical* companion to
 > [`reference/architecture.md`](reference/architecture.md) (the design source of
